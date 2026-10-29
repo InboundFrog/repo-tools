@@ -178,12 +178,15 @@ PYTHON_LINT=ruff check src && echo 'it''s fine'
 NODE_DIRS=web,admin
 DEPENDABOT_EXCLUDE=pip
 DEPENDABOT_INTERVAL=monthly
-DEPENDABOT_COOLDOWN_DAYS=0
+DEPENDABOT_COOLDOWN_DAYS=0   # trailing comment
+QUOTED_HASH=\"keep # this\"
 not a setting
 "
 commit "$repo"
 rt_conf_load "$repo"
 assert_eq "conf parsed (quotes stripped, spaces trimmed)" "3.12" "$(rt_conf PYTHON_VERSION)"
+assert_eq "trailing comment dropped" "0" "$(rt_conf DEPENDABOT_COOLDOWN_DAYS)"
+assert_eq "# inside quotes kept" "keep # this" "$(rt_conf QUOTED_HASH)"
 assert_eq "LANGUAGES limits jobs; EXCLUDE removes; shell not listed" \
   "$(printf '%s\t%s\n' python . node web,admin)" "$(rt_ci_plan "$repo")"
 ci=$(rt_render_ci "$repo" main)
@@ -196,6 +199,57 @@ assert_contains "interval override" "interval: monthly" "$dep"
 assert_not_contains "cooldown 0 omits cooldown" "cooldown:" "$dep"
 printf '%s\n' "$ci" >"$repo/ci.yml"
 validate_yaml "rendered CI with overrides" "$repo/ci.yml"
+
+echo
+echo "System packages, Rust inputs and Dependabot ignore rules"
+repo=$(new_repo)
+mk "$repo" Cargo.toml '[package]'
+mk "$repo" Cargo.lock
+mk "$repo" tools/pyproject.toml '[project]'
+mk "$repo" tools/x.py
+mk "$repo" "$RT_CONF_FILE" "APT_PACKAGES=libudev-dev, pkg-config
+PYTHON_APT_PACKAGES=libpq-dev
+RUST_VERSION=1.96
+RUST_AUDIT=skip
+DEPENDABOT_IGNORE_CARGO=rand:minor+major windows-*
+DEPENDABOT_IGNORE_GITHUB_ACTIONS=actions/checkout:major
+"
+commit "$repo"
+rt_conf_load "$repo"
+ci=$(rt_render_ci "$repo" main)
+dep=$(rt_render_dependabot "$repo")
+rust_job=$(sed -n '/^  rust:/,/^$/p' <<<"$ci")
+python_job=$(sed -n '/^  python:/,/^$/p' <<<"$ci")
+assert_contains "global APT_PACKAGES, space separated" "apt-packages: 'libudev-dev pkg-config'" "$rust_job"
+assert_contains "per-language APT_PACKAGES wins" "apt-packages: 'libpq-dev'" "$python_job"
+assert_contains "RUST_VERSION -> toolchain" "toolchain: '1.96'" "$rust_job"
+assert_contains "RUST_AUDIT -> audit-command" "audit-command: 'skip'" "$rust_job"
+assert_contains "ignore with update types" "- dependency-name: 'rand'
+        update-types: ['version-update:semver-minor', 'version-update:semver-major']" "$dep"
+assert_contains "ignore without update types" "- dependency-name: 'windows-*'" "$dep"
+assert_contains "ignore key for hyphenated ecosystem" "- dependency-name: 'actions/checkout'" "$dep"
+printf '%s\n' "$dep" >"$(rt_tmpdir)/ignore-dependabot.yml"
+validate_yaml "dependabot.yml with ignore rules" "$(rt_tmpdir)/ignore-dependabot.yml"
+mkdir -p "$repo/.github/workflows" && printf '%s\n' "$ci" >"$repo/$RT_CI_FILE"
+if command -v actionlint >/dev/null; then
+  if out=$(cd "$repo" && actionlint "$RT_CI_FILE" 2>&1); then pass "CI with extra inputs passes actionlint"; else fail "CI with extra inputs passes actionlint" "$out"; fi
+fi
+mk "$repo" "$RT_DEPENDABOT_FILE" "version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule: {interval: weekly}
+    ignore:
+      - dependency-name: rand
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: old-crate
+"
+if rt_yaml_to_json "$repo/$RT_DEPENDABOT_FILE" >/dev/null 2>&1; then
+  report=$(rt_compare_dependabot "$repo/$RT_DEPENDABOT_FILE" "$(rt_tmpdir)/ignore-dependabot.yml")
+  assert_contains "ignore rule on both sides (order-insensitive)" "= ignore       rand (major, minor)" "$report"
+  assert_contains "ignore rule only in existing" "- ignore       old-crate" "$report"
+  assert_contains "ignore rule only in repo-tools" "+ ignore       windows-*" "$report"
+fi
 
 echo
 echo "Empty repo"
@@ -246,8 +300,8 @@ echo "Renderer and reusable workflows agree on inputs"
 if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
   for lang in "${RT_LANGS[@]}"; do
     wf="$ROOT/.github/workflows/${RT_WORKFLOW[$lang]}"
-    want=(working-directory lint-command test-command build-command)
-    [[ -z ${RT_VERSION_KEY[$lang]:-} ]] || want+=("${RT_VERSION_KEY[$lang]#*:}")
+    want=(working-directory apt-packages lint-command test-command build-command)
+    for pair in ${RT_INPUT_KEYS[$lang]:-}; do want+=("${pair#*:}"); done
     case $lang in gradle | maven) want+=(build-tool) ;; esac
     # PyYAML reads the bare `on:` key as boolean True.
     missing=$(python3 - "$wf" "${want[@]}" <<'PY'

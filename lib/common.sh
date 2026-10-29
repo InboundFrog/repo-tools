@@ -184,7 +184,11 @@ rt_conf_load() {
     val=${BASH_REMATCH[2]}
     val=${val#"${val%%[![:space:]]*}"} # trim leading space
     val=${val%"${val##*[![:space:]]}"} # trim trailing space
-    if [[ $val =~ ^\"(.*)\"$ || $val =~ ^\'(.*)\'$ ]]; then val=${BASH_REMATCH[1]}; fi
+    if [[ $val =~ ^\"(.*)\"$ || $val =~ ^\'(.*)\'$ ]]; then
+      val=${BASH_REMATCH[1]}
+    elif [[ $val =~ ^(.*[^[:space:]])[[:space:]]+#.*$ ]]; then
+      val=${BASH_REMATCH[1]} # unquoted: drop a trailing " # comment"
+    fi
     RT_CONF[$key]=$val
   done <"$file"
 }

@@ -12,11 +12,16 @@ declare -gA RT_WORKFLOW=(
   [ansible]=ansible.yml [shell]=shell.yml
 )
 
-# Config key -> workflow input for the toolchain version, per language.
-declare -gA RT_VERSION_KEY=(
-  [python]=PYTHON_VERSION:python-version [node]=NODE_VERSION:node-version
-  [gradle]=JAVA_VERSION:java-version [maven]=JAVA_VERSION:java-version
-  [terraform]=TERRAFORM_VERSION:terraform-version
+# Language-specific config keys -> workflow inputs ("KEY:input KEY:input").
+# Every language also takes <LANG>_LINT/_TEST/_BUILD (-> *-command) and
+# APT_PACKAGES / <LANG>_APT_PACKAGES (-> apt-packages).
+declare -gA RT_INPUT_KEYS=(
+  [python]="PYTHON_VERSION:python-version"
+  [node]="NODE_VERSION:node-version"
+  [rust]="RUST_VERSION:toolchain RUST_AUDIT:audit-command"
+  [gradle]="JAVA_VERSION:java-version"
+  [maven]="JAVA_VERSION:java-version"
+  [terraform]="TERRAFORM_VERSION:terraform-version"
 )
 
 RT_DEPENDABOT_INTERVALS=" daily weekly monthly quarterly semiannually yearly "
@@ -62,7 +67,7 @@ rt_ci_plan() {
 }
 
 _rt_render_job() { # LANG DIRS
-  local lang=$1 dirs=$2 matrix='' d key input val kind
+  local lang=$1 dirs=$2 matrix='' d pair key input val kind
   while IFS= read -r d; do
     matrix+="${matrix:+, }$(_rt_yq "$d")"
   done < <(rt_list "$dirs")
@@ -79,12 +84,14 @@ _rt_render_job() { # LANG DIRS
 EOF
   case $lang in gradle | maven) printf '      build-tool: %s\n' "$lang" ;; esac
 
-  if [[ -n ${RT_VERSION_KEY[$lang]:-} ]]; then
-    key=${RT_VERSION_KEY[$lang]%%:*}
-    input=${RT_VERSION_KEY[$lang]#*:}
+  val=$(rt_conf "${lang^^}_APT_PACKAGES" "$(rt_conf APT_PACKAGES)")
+  [[ -z $val ]] || printf '      apt-packages: %s\n' "$(_rt_yq "$(rt_list "$val" | paste -sd' ' -)")"
+
+  for pair in ${RT_INPUT_KEYS[$lang]:-}; do
+    key=${pair%%:*} input=${pair#*:}
     val=$(rt_conf "$key")
-    [[ -n $val ]] && printf '      %s: %s\n' "$input" "$(_rt_yq "$val")"
-  fi
+    [[ -z $val ]] || printf '      %s: %s\n' "$input" "$(_rt_yq "$val")"
+  done
   for kind in lint test build; do
     val=$(rt_conf "${lang^^}_${kind^^}")
     [[ -n $val ]] && printf '      %s-command: %s\n' "$kind" "$(_rt_yq "$val")"
@@ -148,6 +155,34 @@ EOF
 EOF
 }
 
+# DEPENDABOT_IGNORE_<ECOSYSTEM> (e.g. DEPENDABOT_IGNORE_CARGO, _GITHUB_ACTIONS):
+# comma/space separated "dependency[:types]"; types are major/minor/patch
+# joined by "+". No types ignores the dependency entirely. Wildcards allowed.
+#   DEPENDABOT_IGNORE_CARGO=rand:major+minor, windows-*
+#   DEPENDABOT_IGNORE_MAVEN=org.example:legacy-lib:major
+_rt_render_ignore() { # ECOSYSTEM
+  local key entries entry dep types t yaml_types
+  key="DEPENDABOT_IGNORE_$(tr 'a-z-' 'A-Z_' <<<"$1")"
+  entries=$(rt_conf "$key")
+  [[ -n $entries ]] || return 0
+  printf '    ignore:\n'
+  while IFS= read -r entry; do
+    if [[ $entry =~ ^(.+):((major|minor|patch)(\+(major|minor|patch))*)$ ]]; then
+      dep=${BASH_REMATCH[1]} types=${BASH_REMATCH[2]}
+    else
+      dep=$entry types=''
+    fi
+    printf '      - dependency-name: %s\n' "$(_rt_yq "$dep")"
+    if [[ -n $types ]]; then
+      yaml_types=''
+      for t in ${types//+/ }; do
+        yaml_types+="${yaml_types:+, }$(_rt_yq "version-update:semver-$t")"
+      done
+      printf '        update-types: [%s]\n' "$yaml_types"
+    fi
+  done < <(rt_list "$entries")
+}
+
 # rt_render_dependabot DIR
 rt_render_dependabot() {
   local dir=$1 eco dirs d interval cooldown exclude
@@ -173,6 +208,7 @@ EOF
     done < <(rt_list "$dirs")
     printf '    schedule:\n      interval: %s\n' "$interval"
     ((cooldown > 0)) && printf '    cooldown:\n      default-days: %s\n' "$cooldown"
+    _rt_render_ignore "$eco"
     if [[ $eco == github-actions ]]; then
       # Action bumps are low-risk; one PR for all of them.
       printf '    groups:\n      %s:\n        patterns: ["*"]\n' "$eco"

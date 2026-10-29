@@ -9,7 +9,7 @@ which is how updates get rolled out to repos you've already configured.
 |---|---|
 | `bin/repo-dependabot` | Enables Dependabot alerts and security updates; opens a PR adding a generated `.github/dependabot.yml` |
 | `bin/repo-ci` | Opens a PR adding `.github/workflows/repo-tools-ci.yml`, which runs lint, test and build for each detected language |
-| `bin/repo-protect` | Turns on delete-branch-on-merge; on public repos, also secret scanning, push protection, private vulnerability reporting and a default-branch ruleset |
+| `bin/repo-protect` | Turns on delete-branch-on-merge; on public repos, also secret scanning, push protection, private vulnerability reporting, CodeQL default setup and a default-branch ruleset |
 | `bin/repo-apply` | Runs all three across one repo, a list, or `--all` of your repos |
 | `bin/repo-detect` | Shows what would be detected and generated, from a local checkout or a repo. With `--compare`, sets it against the repo's existing `dependabot.yml` and workflows. Changes nothing |
 
@@ -49,7 +49,7 @@ lives in this repo's [reusable workflows](.github/workflows):
 |---|---|---|---|---|
 | Python | `python.yml` | ruff (+ `ruff format` if configured) | pytest | `uv build` |
 | Node / TypeScript | `node.yml` | `lint`, `typecheck`, `format:check` scripts, or `tsc --noEmit` | `test` script | `build` script |
-| Rust | `rust.yml` | `cargo fmt`, `clippy -D warnings` | `cargo test` | `cargo build` |
+| Rust | `rust.yml` | `cargo fmt`, `clippy -D warnings` | `cargo test` (incl. doc tests), plus a `cargo audit` job | `cargo build` |
 | Java / Kotlin (Gradle) | `jvm.yml` | `gradlew check -x test` | `gradlew test` | `gradlew assemble` |
 | Java / Kotlin (Maven) | `jvm.yml` | none by default | `mvn test` | `mvn verify -DskipTests` |
 | Terraform | `terraform.yml` | `terraform fmt`, tflint | `terraform test` | `init -backend=false` + `validate` per directory |
@@ -58,6 +58,12 @@ lives in this repo's [reusable workflows](.github/workflows):
 
 Package managers and toolchain versions are picked up from the project (lockfiles,
 `.python-version`, `.nvmrc`, `.java-version`, `rust-toolchain.toml`, `.terraform-version`, ...).
+Every workflow can install Ubuntu packages first (`APT_PACKAGES`), for native
+libraries the build links against. Rust builds use `--locked` when `Cargo.lock`
+is committed, and save their cache only from the default branch.
+
+Actions in these workflows are pinned to commit SHAs (with the version in a
+comment), since they run in every repo. Dependabot updates the SHAs and comments.
 
 Callers pin `@main`, so **a change merged here applies to every repo on its next
 CI run**. To stage changes, set `RT_REF` (e.g. to a `v1` tag) when running
@@ -76,6 +82,9 @@ re-run `repo-ci` / `repo-dependabot`. See
 [`examples/repo-tools.conf`](examples/repo-tools.conf) for every key. For example:
 
 ```ini
+APT_PACKAGES=libudev-dev libusb-1.0-0-dev pkg-config
+RUST_VERSION=1.96
+DEPENDABOT_IGNORE_CARGO=rand:major+minor
 EXCLUDE=shell
 PYTHON_VERSION=3.12
 PYTHON_TEST=pytest -m "not slow"
@@ -108,8 +117,14 @@ but can't push directly to the default branch. Tune this with environment variab
 |---|---|---|
 | `RT_APPROVALS` | `0` | Required approving reviews |
 | `RT_BYPASS` | `pull_request` | Admin bypass: `pull_request`, `always` or `none` |
+| `RT_CODEQL` | `1` | Enable CodeQL default setup on public repos (`0` to skip) |
 
-**Free plan limits:** rulesets and secret scanning only work on public repos.
+CodeQL default setup needs no workflow file: GitHub picks the languages and keeps
+the queries current. A repo that already runs its own CodeQL workflow (advanced
+setup) keeps it; `repo-protect` warns and moves on. Delete that workflow first if
+you'd rather switch.
+
+**Free plan limits:** rulesets, secret scanning and CodeQL only work on public repos.
 Private repos still get Dependabot, CI and delete-branch-on-merge, but CI isn't
 *enforced*. With GitHub Pro, pass `--include-private` to apply rulesets there too.
 

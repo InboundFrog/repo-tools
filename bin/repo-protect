@@ -10,6 +10,7 @@ RT_RULESET_NAME="repo-tools: default branch"
 RT_APPROVALS="${RT_APPROVALS:-0}"
 RT_BYPASS="${RT_BYPASS:-pull_request}"
 RT_INCLUDE_PRIVATE="${RT_INCLUDE_PRIVATE:-0}"
+RT_CODEQL="${RT_CODEQL:-1}"
 GITHUB_ACTIONS_APP_ID=15368 # pins the required check to GitHub Actions
 REPO_ADMIN_ROLE_ID=5
 
@@ -20,7 +21,9 @@ Usage: $(basename "$0") [options] REPO...
 All repos:
   - delete head branches after merge
 Public repos (or private with --include-private, which needs a paid plan):
-  - secret scanning + push protection, private vulnerability reporting (public only)
+  - secret scanning + push protection, private vulnerability reporting and
+    CodeQL code scanning "default setup" (public only; a repo already running
+    its own CodeQL workflow is left alone)
   - ruleset "$RT_RULESET_NAME" on the default branch: no deletion or force
     push, changes via PR only, and "$RT_CI_CHECK_NAME" must pass once
     $RT_CI_FILE is on the default branch (re-run after merging the CI PR)
@@ -36,6 +39,7 @@ Environment:
   RT_APPROVALS  Required approving reviews (default: 0, as you can't approve your own PRs)
   RT_BYPASS     Admin bypass: pull_request (default; can override failing checks on
                 a PR, but can't push directly), always, or none
+  RT_CODEQL     1 (default) enables CodeQL default setup on public repos; 0 skips it
 EOF
 }
 
@@ -73,6 +77,21 @@ ruleset_json() { # REQUIRE_CHECK(true|false)
     }'
 }
 
+# CodeQL "default setup": GitHub picks the languages and keeps the queries
+# current, with no workflow file in the repo. Repos running their own CodeQL
+# workflow ("advanced setup") can't use it; the API refuses and we move on.
+enable_codeql() {
+  local state
+  state=$(gh api "repos/$RT_REPO/code-scanning/default-setup" --jq .state 2>/dev/null) || state=unknown
+  if [[ $state == configured ]]; then
+    ok "CodeQL default setup already on"
+  elif rt_api PATCH "repos/$RT_REPO/code-scanning/default-setup" '{"state": "configured"}' 2>/dev/null; then
+    rt_done "CodeQL default setup enabled"
+  else
+    warn "could not enable CodeQL default setup (most likely the repo has its own CodeQL workflow); leaving it as is"
+  fi
+}
+
 process() {
   local id require_check=false
   log "Protect: $1"
@@ -95,6 +114,7 @@ process() {
     else
       warn "could not enable private vulnerability reporting"
     fi
+    if ((RT_CODEQL)); then enable_codeql; fi
   elif ((RT_INCLUDE_PRIVATE)); then
     info "private repo: applying ruleset only (--include-private)"
   else
@@ -130,6 +150,7 @@ done
 rt_parse_args "${args[@]+"${args[@]}"}"
 rt_require gh jq
 [[ $RT_APPROVALS =~ ^[0-9]+$ ]] || die "RT_APPROVALS must be a number"
+[[ $RT_CODEQL == [01] ]] || die "RT_CODEQL must be 0 or 1"
 case $RT_BYPASS in pull_request | always | none) ;; *) die "RT_BYPASS must be pull_request, always or none" ;; esac
 if ((RT_APPROVALS > 0)) && [[ $RT_BYPASS == none ]]; then
   warn "RT_APPROVALS=$RT_APPROVALS with no bypass: you won't be able to merge your own PRs alone"

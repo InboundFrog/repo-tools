@@ -1,9 +1,13 @@
 # Reusable Rust CI. Called by the repo-tools-ci.yml that bin/repo-ci generates.
 #
-# Toolchain: stable, unless rust-toolchain(.toml) pins another (rustup honours it).
+# Toolchain: the toolchain input, else rust-toolchain(.toml), else stable.
 # Lint:  cargo fmt --check, cargo clippy -D warnings
-# Test:  cargo test
 # Build: cargo build
+# Test:  cargo test (unit, integration and doc tests)
+# Audit: cargo audit against the RustSec advisory DB (separate job;
+#        honours .cargo/audit.toml)
+# Cargo commands get --locked when Cargo.lock is committed. The build cache is
+# saved only from the default branch, so PR runs reuse it without churning it.
 #
 # Each *-command input replaces its default step; "skip" disables it.
 name: Rust
@@ -15,6 +19,14 @@ on:
         description: Crate or workspace directory, relative to the repo root.
         type: string
         default: "."
+      apt-packages:
+        description: Space-separated Ubuntu packages to install first (e.g. "libudev-dev pkg-config").
+        type: string
+        default: ""
+      toolchain:
+        description: Rust toolchain (e.g. 1.96, stable). Empty uses rust-toolchain(.toml), else stable.
+        type: string
+        default: ""
       lint-command:
         type: string
         default: ""
@@ -22,6 +34,10 @@ on:
         type: string
         default: ""
       build-command:
+        type: string
+        default: ""
+      audit-command:
+        description: Replaces `cargo audit`; "skip" disables the audit job.
         type: string
         default: ""
 
@@ -41,17 +57,35 @@ jobs:
         shell: bash
         working-directory: ${{ inputs.working-directory }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install system packages
+        if: inputs.apt-packages != ''
+        env:
+          PACKAGES: ${{ inputs.apt-packages }}
+        run: |
+          read -ra pkgs <<<"$PACKAGES"
+          for p in "${pkgs[@]}"; do
+            [[ $p =~ ^[a-z0-9][a-z0-9.+:~=-]*$ ]] || { echo "::error::invalid package name: $p"; exit 1; }
+          done
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends "${pkgs[@]}"
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Check for committed Cargo.lock
+        run: |
+          if [[ -f Cargo.lock ]]; then
+            echo "Cargo.lock committed: using --locked"
+            echo "RT_CARGO_LOCKED=true" >>"$GITHUB_ENV"
+          fi
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
-          workspaces: ${{ inputs.working-directory }}
+          toolchain: ${{ inputs.toolchain }}
+          components: rustfmt, clippy
+          rust-src-dir: ${{ inputs.working-directory }}
+          cache-save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Lint
         env:
@@ -61,8 +95,12 @@ jobs:
             skip) echo "Lint skipped"; exit 0 ;;
             ?*) eval "$CMD"; exit ;;
           esac
+          lock=()
+          [[ ${RT_CARGO_LOCKED:-} != true ]] || lock=(--locked)
+          # A rust-toolchain.toml may not list these; no-op if already installed.
+          rustup component add rustfmt clippy
           cargo fmt --all --check
-          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets "${lock[@]}" -- -D warnings
 
       - name: Build
         env:
@@ -72,7 +110,9 @@ jobs:
             skip) echo "Build skipped"; exit 0 ;;
             ?*) eval "$CMD"; exit ;;
           esac
-          cargo build --workspace --all-targets
+          lock=()
+          [[ ${RT_CARGO_LOCKED:-} != true ]] || lock=(--locked)
+          cargo build --workspace --all-targets "${lock[@]}"
 
       - name: Test
         env:
@@ -82,4 +122,30 @@ jobs:
             skip) echo "Tests skipped"; exit 0 ;;
             ?*) eval "$CMD"; exit ;;
           esac
-          cargo test --workspace
+          lock=()
+          [[ ${RT_CARGO_LOCKED:-} != true ]] || lock=(--locked)
+          cargo test --workspace "${lock[@]}"
+
+  audit:
+    name: cargo audit
+    if: inputs.audit-command != 'skip'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+        with:
+          tool: cargo-audit
+
+      - name: Audit dependencies
+        env:
+          CMD: ${{ inputs.audit-command }}
+        run: |
+          if [[ -n $CMD ]]; then eval "$CMD"; else cargo audit; fi

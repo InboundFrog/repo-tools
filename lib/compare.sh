@@ -51,7 +51,7 @@ _RT_JQ_REPORT='
   def list: if length == 0 then "none" else join(", ") end;
   def cool: if . == null then "none" else (to_entries | map("\(.key): \(.value)") | join(", ")) end;
   def ign: "\(.["dependency-name"])" +
-    (if .["update-types"] then " (" + (.["update-types"] | map(sub("version-update:semver-"; "")) | join(", ")) + ")" else "" end) +
+    (if .["update-types"] then " (" + (.["update-types"] | map(sub("version-update:semver-"; "")) | sort | join(", ")) + ")" else "" end) +
     (if .versions then " versions " + (.versions | tostring) else "" end);
   def row($mark; $label; $text): "      \($mark) \($label | . + " " * (12 - length)) \($text)";
 
@@ -82,7 +82,10 @@ _RT_JQ_REPORT='
             elif $a.cooldown == null then row("+"; "cooldown"; $b.cooldown | cool)
             elif $b.cooldown == null then row("-"; "cooldown"; $a.cooldown | cool)
             else row("~"; "cooldown"; "existing \($a.cooldown | cool); repo-tools \($b.cooldown | cool)") end ),
-          ( $a.ignore[] | row("-"; "ignore"; ign) ),
+          ( ($a.ignore | map(ign)) as $ai | ($b.ignore | map(ign)) as $bi |
+            (($ai - ($ai - $bi))[] | row("="; "ignore"; .)),
+            (($ai - $bi)[] | row("-"; "ignore"; .)),
+            (($bi - $ai)[] | row("+"; "ignore"; .)) ),
           ( if ($a.extra | length) > 0 then row("-"; "other keys"; $a.extra | list) else empty end ),
           ( if $a.entries > 1 then row("~"; "entries"; "existing splits this into \($a.entries) update entries") else empty end )
         end),
@@ -112,7 +115,7 @@ rt_compare_dependabot() {
 declare -gA RT_DEFAULT_STEPS=(
   [python]="lint: ruff check (+ ruff format --check if configured) | test: pytest | build: uv build"
   [node]="lint: lint/typecheck/format:check scripts | test: test script | build: build script"
-  [rust]="lint: cargo fmt --check, clippy --workspace --all-targets -D warnings | build: cargo build --workspace --all-targets | test: cargo test --workspace"
+  [rust]="lint: cargo fmt --check, clippy --workspace --all-targets -D warnings | build: cargo build --workspace --all-targets | test: cargo test --workspace (incl. doc tests) | audit: cargo audit (separate job) | --locked when Cargo.lock is committed; cache saved from the default branch only"
   [gradle]="lint: gradlew check -x test | test: gradlew test | build: gradlew assemble"
   [maven]="lint: (none) | test: mvn test | build: mvn verify -DskipTests"
   [terraform]="lint: terraform fmt -check, tflint | build: init -backend=false + validate | test: terraform test"
@@ -165,11 +168,18 @@ rt_list_workflows() {
   while IFS=$'\t' read -r lang dirs; do
     [[ -n $lang ]] || continue
     steps=${RT_DEFAULT_STEPS[$lang]}
-    for kind in lint test build; do
+    for kind in lint test build audit; do
       val=$(rt_conf "${lang^^}_${kind^^}")
       [[ -z $val ]] || steps=$(sed -E "s#${kind}: [^|]*#${kind}: ${val//#/\\#} (override) #" <<<"$steps")
     done
     echo "    job $lang  (dirs: $dirs)"
+    val=$(rt_conf "${lang^^}_APT_PACKAGES" "$(rt_conf APT_PACKAGES)")
+    [[ -z $val ]] || echo "      apt: $val"
+    for pair in ${RT_INPUT_KEYS[$lang]:-}; do
+      [[ ${pair#*:} == *-command ]] && continue
+      val=$(rt_conf "${pair%%:*}")
+      [[ -z $val ]] || echo "      ${pair#*:}: $val"
+    done
     tr '|' '\n' <<<"$steps" | sed -E 's/^ +//; s/ +$//; s/^/      /'
   done <<<"$plan"
   echo "    job ci-ok \"$RT_CI_CHECK_NAME\"  (the check branch protection requires)"

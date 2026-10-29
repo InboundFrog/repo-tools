@@ -15,6 +15,10 @@ on:
         description: Directory to scan, relative to the repo root.
         type: string
         default: "."
+      apt-packages:
+        description: Space-separated Ubuntu packages to install first (e.g. "libudev-dev pkg-config").
+        type: string
+        default: ""
       lint-command:
         type: string
         default: ""
@@ -38,9 +42,21 @@ jobs:
         shell: bash
         working-directory: ${{ inputs.working-directory }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install system packages
+        if: inputs.apt-packages != ''
+        env:
+          PACKAGES: ${{ inputs.apt-packages }}
+        run: |
+          read -ra pkgs <<<"$PACKAGES"
+          for p in "${pkgs[@]}"; do
+            [[ $p =~ ^[a-z0-9][a-z0-9.+:~=-]*$ ]] || { echo "::error::invalid package name: $p"; exit 1; }
+          done
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends "${pkgs[@]}"
 
       - name: Lint
         env:
