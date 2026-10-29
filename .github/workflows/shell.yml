@@ -1,0 +1,88 @@
+# Reusable shell script CI. Called by the repo-tools-ci.yml that bin/repo-ci
+# generates (repo-tools also uses it on itself).
+#
+# Lint:  shellcheck on tracked *.sh / *.bash files and extensionless scripts
+#        with a sh/bash shebang (honours .shellcheckrc)
+# Test:  bats, if any *.bats files are tracked
+#
+# Each *-command input replaces its default step; "skip" disables it.
+name: Shell
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory to scan, relative to the repo root.
+        type: string
+        default: "."
+      lint-command:
+        type: string
+        default: ""
+      test-command:
+        type: string
+        default: ""
+      build-command:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Lint
+        env:
+          CMD: ${{ inputs.lint-command }}
+        run: |
+          case $CMD in
+            skip) echo "Lint skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          shebang='^#!.*(/|[[:space:]])(ba|da|k)?sh([[:space:]]|$)'
+          files=()
+          while IFS= read -r f; do
+            case $f in
+              *.sh | *.bash) files+=("$f") ;;
+              */*.* | *.*) ;;
+              *)
+                [[ -f $f && ! -L $f ]] || continue
+                IFS= read -r first <"$f" 2>/dev/null || continue
+                if [[ $first =~ $shebang ]]; then files+=("$f"); fi
+                ;;
+            esac
+          done < <(git ls-files .)
+          if ((${#files[@]} == 0)); then echo "No shell scripts found"; exit 0; fi
+          printf 'Checking %d file(s)\n' "${#files[@]}"
+          shellcheck --version | sed -n 2p
+          shellcheck --external-sources --source-path=SCRIPTDIR "${files[@]}"
+
+      - name: Test
+        env:
+          CMD: ${{ inputs.test-command }}
+        run: |
+          case $CMD in
+            skip) echo "Tests skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          mapfile -t tests < <(git ls-files '*.bats')
+          if ((${#tests[@]} == 0)); then echo "No bats tests"; exit 0; fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq bats >/dev/null
+          bats "${tests[@]}"
+
+      - name: Build
+        if: inputs.build-command != '' && inputs.build-command != 'skip'
+        env:
+          CMD: ${{ inputs.build-command }}
+        run: eval "$CMD"

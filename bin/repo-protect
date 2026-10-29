@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Protect the default branch with a ruleset, and enable free security features.
+set -euo pipefail
+
+RT_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+# shellcheck source=lib/common.sh
+source "$RT_ROOT/lib/common.sh"
+
+RT_RULESET_NAME="repo-tools: default branch"
+RT_APPROVALS="${RT_APPROVALS:-0}"
+RT_BYPASS="${RT_BYPASS:-pull_request}"
+RT_INCLUDE_PRIVATE="${RT_INCLUDE_PRIVATE:-0}"
+GITHUB_ACTIONS_APP_ID=15368 # pins the required check to GitHub Actions
+REPO_ADMIN_ROLE_ID=5
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options] REPO...
+
+All repos:
+  - delete head branches after merge
+Public repos (or private with --include-private, which needs a paid plan):
+  - secret scanning + push protection, private vulnerability reporting (public only)
+  - ruleset "$RT_RULESET_NAME" on the default branch: no deletion or force
+    push, changes via PR only, and "$RT_CI_CHECK_NAME" must pass once
+    $RT_CI_FILE is on the default branch (re-run after merging the CI PR)
+
+REPO is "owner/name", or "name" for repos you own.
+
+Options:
+  -n, --dry-run           Show what would change without changing anything
+      --include-private   Also apply rulesets to private repos (GitHub Pro)
+  -h, --help              Show this help
+
+Environment:
+  RT_APPROVALS  Required approving reviews (default: 0, as you can't approve your own PRs)
+  RT_BYPASS     Admin bypass: pull_request (default; can override failing checks on
+                a PR, but can't push directly), always, or none
+EOF
+}
+
+ruleset_json() { # REQUIRE_CHECK(true|false)
+  jq -n \
+    --arg name "$RT_RULESET_NAME" \
+    --arg bypass "$RT_BYPASS" \
+    --arg check "$RT_CI_CHECK_NAME" \
+    --argjson approvals "$RT_APPROVALS" \
+    --argjson require_check "$1" \
+    --argjson app_id "$GITHUB_ACTIONS_APP_ID" \
+    --argjson admin_role "$REPO_ADMIN_ROLE_ID" \
+    '{
+      name: $name,
+      target: "branch",
+      enforcement: "active",
+      conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
+      bypass_actors: (if $bypass == "none" then [] else
+        [{ actor_id: $admin_role, actor_type: "RepositoryRole", bypass_mode: $bypass }] end),
+      rules: ([
+        { type: "deletion" },
+        { type: "non_fast_forward" },
+        { type: "pull_request", parameters: {
+            required_approving_review_count: $approvals,
+            dismiss_stale_reviews_on_push: true,
+            require_code_owner_review: false,
+            require_last_push_approval: false,
+            required_review_thread_resolution: false } }
+      ] + (if $require_check then [
+        { type: "required_status_checks", parameters: {
+            strict_required_status_checks_policy: false,
+            do_not_enforce_on_create: true,
+            required_status_checks: [{ context: $check, integration_id: $app_id }] } }
+      ] else [] end))
+    }'
+}
+
+process() {
+  local id require_check=false
+  log "Protect: $1"
+  rt_load_repo "$(rt_resolve_repo "$1")"
+  rt_check_repo_usable
+
+  rt_api PATCH "repos/$RT_REPO" '{"delete_branch_on_merge": true}'
+  rt_done "delete branch on merge enabled"
+
+  if rt_is_public; then
+    if rt_api PATCH "repos/$RT_REPO" '{"security_and_analysis": {
+      "secret_scanning": {"status": "enabled"},
+      "secret_scanning_push_protection": {"status": "enabled"}}}'; then
+      rt_done "secret scanning + push protection enabled"
+    else
+      warn "could not enable secret scanning"
+    fi
+    if rt_api PUT "repos/$RT_REPO/private-vulnerability-reporting"; then
+      rt_done "private vulnerability reporting enabled"
+    else
+      warn "could not enable private vulnerability reporting"
+    fi
+  elif ((RT_INCLUDE_PRIVATE)); then
+    info "private repo: applying ruleset only (--include-private)"
+  else
+    info "private repo: rulesets need GitHub Pro; skipping (use --include-private if you have it)"
+    return 0
+  fi
+
+  if gh api "repos/$RT_REPO/contents/$RT_CI_FILE?ref=$RT_DEFAULT_BRANCH" --silent 2>/dev/null; then
+    require_check=true
+  else
+    warn "$RT_CI_FILE isn't on $RT_DEFAULT_BRANCH yet, so '$RT_CI_CHECK_NAME' won't be required."
+    warn "Merge the repo-ci PR, then re-run repo-protect."
+  fi
+
+  id=$(gh api "repos/$RT_REPO/rulesets?includes_parents=false" \
+    --jq ".[] | select(.name == \"$RT_RULESET_NAME\") | .id")
+  if [[ -n $id ]]; then
+    rt_api PUT "repos/$RT_REPO/rulesets/$id" "$(ruleset_json "$require_check")"
+    rt_done "ruleset updated (required check: $require_check)"
+  else
+    rt_api POST "repos/$RT_REPO/rulesets" "$(ruleset_json "$require_check")"
+    rt_done "ruleset created (required check: $require_check)"
+  fi
+}
+
+args=()
+for arg in "$@"; do
+  case $arg in
+    --include-private) RT_INCLUDE_PRIVATE=1 ;;
+    *) args+=("$arg") ;;
+  esac
+done
+rt_parse_args "${args[@]+"${args[@]}"}"
+rt_require gh jq
+[[ $RT_APPROVALS =~ ^[0-9]+$ ]] || die "RT_APPROVALS must be a number"
+case $RT_BYPASS in pull_request | always | none) ;; *) die "RT_BYPASS must be pull_request, always or none" ;; esac
+if ((RT_APPROVALS > 0)) && [[ $RT_BYPASS == none ]]; then
+  warn "RT_APPROVALS=$RT_APPROVALS with no bypass: you won't be able to merge your own PRs alone"
+fi
+rt_for_each_repo process "${RT_ARGS[@]+"${RT_ARGS[@]}"}"

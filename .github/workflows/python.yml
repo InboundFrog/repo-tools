@@ -1,0 +1,126 @@
+# Reusable Python CI. Called by the repo-tools-ci.yml that bin/repo-ci generates.
+#
+# Install: uv.lock -> uv sync; poetry.lock -> poetry install; otherwise a venv
+#          with the project (+ dev/test extras) and any requirements*.txt.
+# Lint:    ruff check; ruff format --check too if the project configures ruff.
+# Test:    pytest (no tests collected counts as a pass).
+# Build:   uv build, if the project declares a build system.
+#
+# Each *-command input replaces its default step; "skip" disables it.
+name: Python
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Project directory, relative to the repo root.
+        type: string
+        default: "."
+      python-version:
+        description: Python version. Empty uses .python-version, else 3.13.
+        type: string
+        default: ""
+      lint-command:
+        type: string
+        default: ""
+      test-command:
+        type: string
+        default: ""
+      build-command:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, test & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve Python version
+        id: python
+        env:
+          REQUESTED: ${{ inputs.python-version }}
+        run: |
+          if [[ -n $REQUESTED ]]; then v=$REQUESTED
+          elif [[ -f .python-version ]]; then v=$(head -n1 .python-version)
+          else v=3.13
+          fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ steps.python.outputs.version }}
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: |
+          if [[ -f uv.lock ]]; then
+            uv sync --all-extras --dev
+          elif [[ -f poetry.lock ]]; then
+            POETRY_VIRTUALENVS_IN_PROJECT=true uvx poetry install --no-interaction --all-extras
+          else
+            uv venv .venv --python "$(command -v python)"
+            export VIRTUAL_ENV=$PWD/.venv
+            if [[ -f pyproject.toml || -f setup.py ]]; then
+              uv pip install -e '.[dev,test]' || uv pip install -e .
+            fi
+            for f in requirements.txt requirements-dev.txt requirements-test.txt dev-requirements.txt test-requirements.txt; do
+              if [[ -f $f ]]; then uv pip install -r "$f"; fi
+            done
+          fi
+          echo "VIRTUAL_ENV=$PWD/.venv" >>"$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >>"$GITHUB_PATH"
+
+      - name: Lint
+        env:
+          CMD: ${{ inputs.lint-command }}
+        run: |
+          case $CMD in
+            skip) echo "Lint skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          ruff() { if command -v ruff >/dev/null; then command ruff "$@"; else uvx ruff "$@"; fi; }
+          ruff check --output-format=github .
+          if [[ -f ruff.toml || -f .ruff.toml ]] || grep -qs '^\[tool\.ruff' pyproject.toml; then
+            ruff format --check .
+          fi
+
+      - name: Test
+        env:
+          CMD: ${{ inputs.test-command }}
+        run: |
+          case $CMD in
+            skip) echo "Tests skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          python -c 'import pytest' 2>/dev/null || uv pip install pytest
+          rc=0
+          python -m pytest || rc=$?
+          if ((rc == 5)); then echo "No tests collected"; exit 0; fi
+          exit "$rc"
+
+      - name: Build
+        env:
+          CMD: ${{ inputs.build-command }}
+        run: |
+          case $CMD in
+            skip) echo "Build skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          if grep -qs '^\[build-system\]' pyproject.toml || [[ -f setup.py ]]; then
+            uv build
+          else
+            echo "No build system declared; nothing to build"
+          fi

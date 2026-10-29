@@ -1,0 +1,14 @@
+# Managed by repo-tools (bin/repo-dependabot). Local edits will be overwritten.
+# Customise via .github/repo-tools.conf instead: https://github.com/InboundFrog/repo-tools
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - '/'
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    groups:
+      github-actions:
+        patterns: ["*"]

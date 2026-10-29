@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Run every repo-tools step (or a subset) across one, many or all repos.
+set -euo pipefail
+
+RT_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+# shellcheck source=lib/common.sh
+source "$RT_ROOT/lib/common.sh"
+
+STEPS_ALL=(dependabot ci protect)
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [options] [REPO...]
+
+Runs repo-dependabot, repo-ci and repo-protect against each repo. Every step
+is idempotent: re-running only changes what's out of date, which is how
+updates to repo-tools get rolled out.
+
+Repo selection (combine freely):
+  REPO...             "owner/name", or "name" for repos you own
+      --all           every non-archived, non-fork repo you own
+      --public        with --all: only public repos
+      --file FILE     repos listed in FILE, one per line (# comments allowed)
+
+Options:
+      --only STEPS    comma-separated subset of: ${STEPS_ALL[*]}
+      --include-private  passed to repo-protect (needs GitHub Pro)
+  -n, --dry-run       Show what would change without changing anything
+  -f, --force         Replace existing unmanaged dependabot.yml / CI files
+  -h, --help          Show this help
+EOF
+}
+
+repos=() steps=("${STEPS_ALL[@]}") flags=() protect_flags=() all=0 public=0
+while (($#)); do
+  case $1 in
+    --all) all=1 ;;
+    --public) public=1 ;;
+    --file)
+      [[ -r ${2:-} ]] || die "--file needs a readable file"
+      mapfile -t -O "${#repos[@]}" repos < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$2")
+      shift
+      ;;
+    --only)
+      [[ -n ${2:-} ]] || die "--only needs a list of steps"
+      mapfile -t steps < <(rt_list "$2")
+      shift
+      ;;
+    --include-private) protect_flags+=(--include-private) ;;
+    -n | --dry-run) flags+=(--dry-run) ;;
+    -f | --force) flags+=(--force) ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    -*) die "unknown option: $1 (see --help)" ;;
+    *) repos+=("$1") ;;
+  esac
+  shift
+done
+
+for step in "${steps[@]}"; do
+  [[ " ${STEPS_ALL[*]} " == *" $step "* ]] || die "unknown step '$step' (choose from: ${STEPS_ALL[*]})"
+done
+
+rt_require gh git jq
+export RT_OWNER
+RT_OWNER=$(rt_owner)
+
+if ((all)); then
+  list_args=(--limit 1000 --no-archived --source --json nameWithOwner --jq '.[].nameWithOwner')
+  ((public)) && list_args+=(--visibility public)
+  mapfile -t -O "${#repos[@]}" repos < <(gh repo list "$RT_OWNER" "${list_args[@]}")
+fi
+((${#repos[@]})) || {
+  usage >&2
+  exit 1
+}
+
+failed=()
+for repo in "${repos[@]}"; do
+  for step in "${steps[@]}"; do
+    step_flags=("${flags[@]+"${flags[@]}"}")
+    [[ $step == protect ]] && step_flags+=("${protect_flags[@]+"${protect_flags[@]}"}")
+    if ! "$RT_ROOT/bin/repo-$step" "${step_flags[@]+"${step_flags[@]}"}" "$repo"; then
+      failed+=("$repo ($step)")
+    fi
+  done
+done
+
+echo >&2
+if ((${#failed[@]})); then
+  printf '%sFailed:%s\n' "$_rt_r" "$_rt_0" >&2
+  printf '  %s\n' "${failed[@]}" >&2
+  exit 1
+fi
+log "Done: ${#repos[@]} repo(s), steps: ${steps[*]}"

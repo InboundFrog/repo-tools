@@ -1,0 +1,136 @@
+# Reusable Java / Kotlin CI (Gradle or Maven). Called by the repo-tools-ci.yml
+# that bin/repo-ci generates.
+#
+#          Gradle (needs ./gradlew)        Maven (./mvnw if present, else mvn)
+# Lint:    ./gradlew check -x test          (none by default; plugins bound to
+# Test:    ./gradlew test                    `verify` still run in the build step)
+# Build:   ./gradlew assemble               mvn test / mvn verify -DskipTests
+#
+# Lint picks up whatever the build configures (ktlint, detekt, spotless, checkstyle...).
+# Each *-command input replaces its default step; "skip" disables it.
+name: JVM
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Project directory, relative to the repo root.
+        type: string
+        default: "."
+      build-tool:
+        description: gradle or maven. Empty detects from the files present.
+        type: string
+        default: ""
+      java-version:
+        description: JDK version. Empty uses .java-version / .sdkmanrc, else 21.
+        type: string
+        default: ""
+      java-distribution:
+        type: string
+        default: temurin
+      lint-command:
+        type: string
+        default: ""
+      test-command:
+        type: string
+        default: ""
+      build-command:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, test & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Detect toolchain
+        id: detect
+        env:
+          TOOL: ${{ inputs.build-tool }}
+          REQUESTED: ${{ inputs.java-version }}
+        run: |
+          if [[ -z $TOOL ]]; then
+            if compgen -G 'build.gradle*' >/dev/null || compgen -G 'settings.gradle*' >/dev/null; then TOOL=gradle
+            elif [[ -f pom.xml ]]; then TOOL=maven
+            else echo "::error::No Gradle or Maven build found"; exit 1
+            fi
+          fi
+          if [[ -n $REQUESTED ]]; then v=$REQUESTED
+          elif [[ -f .java-version ]]; then v=$(head -n1 .java-version)
+          elif [[ -f .sdkmanrc ]] && grep -q '^java=' .sdkmanrc; then
+            v=$(sed -nE 's/^java=([0-9]+).*/\1/p' .sdkmanrc)
+          else v=21
+          fi
+          if [[ $TOOL == gradle ]]; then
+            [[ -f gradlew ]] || { echo "::error::Gradle project without ./gradlew wrapper"; exit 1; }
+            chmod +x gradlew
+            run=./gradlew
+          else
+            if [[ -f mvnw ]]; then chmod +x mvnw; run=./mvnw; else run=mvn; fi
+          fi
+          { echo "tool=$TOOL"; echo "version=$v"; echo "run=$run"; } >>"$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: ${{ inputs.java-distribution }}
+          java-version: ${{ steps.detect.outputs.version }}
+          cache: ${{ steps.detect.outputs.tool == 'maven' && 'maven' || '' }}
+
+      - if: steps.detect.outputs.tool == 'gradle'
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Lint
+        env:
+          CMD: ${{ inputs.lint-command }}
+          TOOL: ${{ steps.detect.outputs.tool }}
+          RUN: ${{ steps.detect.outputs.run }}
+        run: |
+          case $CMD in
+            skip) echo "Lint skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          if [[ $TOOL == gradle ]]; then
+            "$RUN" check -x test --continue
+          else
+            echo "No default Maven lint; plugins bound to 'verify' run in the build step"
+          fi
+
+      - name: Test
+        env:
+          CMD: ${{ inputs.test-command }}
+          TOOL: ${{ steps.detect.outputs.tool }}
+          RUN: ${{ steps.detect.outputs.run }}
+        run: |
+          case $CMD in
+            skip) echo "Tests skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          if [[ $TOOL == gradle ]]; then "$RUN" test --continue
+          else "$RUN" -B -ntp test
+          fi
+
+      - name: Build
+        env:
+          CMD: ${{ inputs.build-command }}
+          TOOL: ${{ steps.detect.outputs.tool }}
+          RUN: ${{ steps.detect.outputs.run }}
+        run: |
+          case $CMD in
+            skip) echo "Build skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          if [[ $TOOL == gradle ]]; then "$RUN" assemble
+          else "$RUN" -B -ntp verify -DskipTests
+          fi

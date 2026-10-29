@@ -1,0 +1,85 @@
+# Reusable Rust CI. Called by the repo-tools-ci.yml that bin/repo-ci generates.
+#
+# Toolchain: stable, unless rust-toolchain(.toml) pins another (rustup honours it).
+# Lint:  cargo fmt --check, cargo clippy -D warnings
+# Test:  cargo test
+# Build: cargo build
+#
+# Each *-command input replaces its default step; "skip" disables it.
+name: Rust
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Crate or workspace directory, relative to the repo root.
+        type: string
+        default: "."
+      lint-command:
+        type: string
+        default: ""
+      test-command:
+        type: string
+        default: ""
+      build-command:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Lint, test & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
+
+      - name: Lint
+        env:
+          CMD: ${{ inputs.lint-command }}
+        run: |
+          case $CMD in
+            skip) echo "Lint skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        env:
+          CMD: ${{ inputs.build-command }}
+        run: |
+          case $CMD in
+            skip) echo "Build skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          cargo build --workspace --all-targets
+
+      - name: Test
+        env:
+          CMD: ${{ inputs.test-command }}
+        run: |
+          case $CMD in
+            skip) echo "Tests skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          cargo test --workspace

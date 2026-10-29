@@ -1,0 +1,3 @@
+# bin/* source lib/*.sh relative to the repo root.
+source-path=SCRIPTDIR/..
+external-sources=true

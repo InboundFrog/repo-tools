@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# Offline tests for detection, config handling and rendering. No GitHub access
+# needed. Uses actionlint and python3+PyYAML for extra validation when present.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+# shellcheck source=lib/common.sh
+source "$ROOT/lib/common.sh"
+# shellcheck source=lib/detect.sh
+source "$ROOT/lib/detect.sh"
+# shellcheck source=lib/render.sh
+source "$ROOT/lib/render.sh"
+# shellcheck source=lib/gitops.sh
+source "$ROOT/lib/gitops.sh"
+
+PASS=0 FAIL=0
+pass() {
+  PASS=$((PASS + 1))
+  printf '  ok   %s\n' "$1"
+}
+fail() {
+  FAIL=$((FAIL + 1))
+  printf '  FAIL %s\n' "$1"
+  [[ -z ${2:-} ]] || printf '%s\n' "$2" | sed 's/^/       /'
+}
+assert_eq() { # NAME EXPECTED ACTUAL
+  if [[ $2 == "$3" ]]; then pass "$1"; else fail "$1" "$(diff <(printf '%s\n' "$2") <(printf '%s\n' "$3") || true)"; fi
+}
+assert_contains() { # NAME NEEDLE HAYSTACK
+  if [[ $3 == *"$2"* ]]; then pass "$1"; else fail "$1" "missing: $2"; fi
+}
+assert_not_contains() {
+  if [[ $3 != *"$2"* ]]; then pass "$1"; else fail "$1" "unexpected: $2"; fi
+}
+
+# new_repo -> path of an empty git repo; files added with mk + commit
+new_repo() {
+  local d
+  d=$(mktemp -d "$(rt_tmpdir)/fixture.XXXXXX")
+  git -C "$d" init -q -b main
+  git -C "$d" config user.email test@example.com
+  git -C "$d" config user.name test
+  printf '%s\n' "$d"
+}
+mk() { # REPO PATH [CONTENT]
+  mkdir -p "$(dirname "$1/$2")"
+  printf '%s' "${3:-}" >"$1/$2"
+}
+commit() { git -C "$1" add -A && git -C "$1" commit -qm fixture --allow-empty; }
+
+validate_yaml() { # NAME FILE
+  if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
+    if python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$2" 2>/dev/null; then
+      pass "$1: valid YAML"
+    else
+      fail "$1: valid YAML" "$(python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$2" 2>&1)"
+    fi
+  fi
+}
+
+echo "Polyglot repo detection"
+repo=$(new_repo)
+mk "$repo" package.json '{}'
+mk "$repo" packages/a/package.json '{}'                 # npm workspace member: folded into root
+mk "$repo" node_modules/x/package.json '{}'             # ignored path
+mk "$repo" tools/py/pyproject.toml '[project]'
+mk "$repo" tools/py/uv.lock
+mk "$repo" tools/py/main.py
+mk "$repo" scripts/requirements.txt 'requests'
+mk "$repo" crates/Cargo.toml
+mk "$repo" crates/core/Cargo.toml                       # cargo workspace member
+mk "$repo" jvm/settings.gradle.kts
+mk "$repo" jvm/app/build.gradle.kts
+mk "$repo" legacy/pom.xml
+mk "$repo" infra/main.tf
+mk "$repo" infra/modules/net/main.tf
+mk "$repo" ansible/roles/web/tasks/main.yml
+mk "$repo" deploy.sh 'echo'
+mk "$repo" bin/tool $'#!/usr/bin/env bash\necho'
+mk "$repo" bin/pytool $'#!/usr/bin/env python3\n'
+mk "$repo" Dockerfile 'FROM scratch'
+commit "$repo"
+
+assert_eq "CI languages and directories" \
+  "$(printf '%s\t%s\n' python scripts,tools/py node . rust crates gradle jvm maven legacy terraform . ansible ansible shell .)" \
+  "$(rt_detect_langs "$repo")"
+assert_eq "Dependabot ecosystems and directories" \
+  "$(printf '%s\t%s\n' github-actions . npm . uv tools/py pip scripts cargo crates gradle jvm maven legacy \
+    terraform infra,infra/modules/net docker .)" \
+  "$(rt_detect_ecosystems "$repo")"
+assert_eq "shell scripts found by extension and shebang" \
+  "$(printf '%s\n' bin/tool deploy.sh)" "$(rt_shell_files "$repo" | sort)"
+
+rt_conf_load "$repo"
+ci=$(rt_render_ci "$repo" main)
+dep=$(rt_render_dependabot "$repo")
+assert_contains "CI calls reusable workflow at RT_REF" "uses: $RT_SOURCE_REPO/.github/workflows/python.yml@$RT_REF" "$ci"
+assert_contains "CI matrix over python dirs" "dir: ['scripts', 'tools/py']" "$ci"
+assert_contains "gradle job passes build-tool" "build-tool: gradle" "$ci"
+assert_contains "aggregate job needs every language" \
+  "needs: [python, node, rust, gradle, maven, terraform, ansible, shell]" "$ci"
+assert_contains "aggregate job named for branch protection" "name: $RT_CI_CHECK_NAME" "$ci"
+assert_contains "CI runs on pushes to the default branch" "branches: ['main']" "$ci"
+assert_contains "dependabot lists terraform module dirs" "      - '/infra/modules/net'" "$dep"
+assert_contains "dependabot groups minor/patch" "update-types: [minor, patch]" "$dep"
+assert_contains "managed marker present (CI)" "$RT_MARKER" "$ci"
+assert_contains "managed marker present (dependabot)" "$RT_MARKER" "$dep"
+
+mkdir -p "$repo/.github/workflows"
+printf '%s\n' "$ci" >"$repo/$RT_CI_FILE"
+printf '%s\n' "$dep" >"$repo/$RT_DEPENDABOT_FILE"
+validate_yaml "rendered CI" "$repo/$RT_CI_FILE"
+validate_yaml "rendered dependabot.yml" "$repo/$RT_DEPENDABOT_FILE"
+if command -v actionlint >/dev/null; then
+  if out=$(cd "$repo" && actionlint "$RT_CI_FILE" 2>&1); then pass "rendered CI passes actionlint"; else fail "rendered CI passes actionlint" "$out"; fi
+fi
+
+echo
+echo "Config overrides (.github/repo-tools.conf)"
+repo=$(new_repo)
+mk "$repo" pyproject.toml '[project]'
+mk "$repo" app.py
+mk "$repo" web/package.json '{}'
+mk "$repo" run.sh 'echo'
+mk "$repo" "$RT_CONF_FILE" "# comment
+LANGUAGES = python, node, rust
+EXCLUDE=rust
+PYTHON_VERSION=\"3.12\"
+PYTHON_TEST=skip
+PYTHON_LINT=ruff check src && echo 'it''s fine'
+NODE_DIRS=web,admin
+DEPENDABOT_EXCLUDE=pip
+DEPENDABOT_INTERVAL=monthly
+DEPENDABOT_COOLDOWN_DAYS=0
+not a setting
+"
+commit "$repo"
+rt_conf_load "$repo"
+assert_eq "conf parsed (quotes stripped, spaces trimmed)" "3.12" "$(rt_conf PYTHON_VERSION)"
+assert_eq "LANGUAGES limits jobs; EXCLUDE removes; shell not listed" \
+  "$(printf '%s\t%s\n' python . node web,admin)" "$(rt_ci_plan "$repo")"
+ci=$(rt_render_ci "$repo" main)
+dep=$(rt_render_dependabot "$repo")
+assert_contains "version override" "python-version: '3.12'" "$ci"
+assert_contains "skip passed through" "test-command: 'skip'" "$ci"
+assert_contains "single quotes escaped" "lint-command: 'ruff check src && echo ''it''''s fine'''" "$ci"
+assert_not_contains "excluded ecosystem dropped" "package-ecosystem: pip" "$dep"
+assert_contains "interval override" "interval: monthly" "$dep"
+assert_not_contains "cooldown 0 omits cooldown" "cooldown:" "$dep"
+printf '%s\n' "$ci" >"$repo/ci.yml"
+validate_yaml "rendered CI with overrides" "$repo/ci.yml"
+
+echo
+echo "Empty repo"
+repo=$(new_repo)
+mk "$repo" README.md '# hi'
+commit "$repo"
+RT_CONF=()
+assert_eq "nothing detected" "" "$(rt_ci_plan "$repo")"
+ci=$(rt_render_ci "$repo" main)
+assert_contains "still renders the CI OK job" "name: $RT_CI_CHECK_NAME" "$ci"
+assert_not_contains "no needs when there are no jobs" "needs:" "$ci"
+assert_eq "dependabot covers only github-actions" \
+  "$(printf '%s\t%s\n' github-actions .)" "$(rt_detect_ecosystems "$repo")"
+mkdir -p "$repo/.github/workflows"
+printf '%s\n' "$ci" >"$repo/$RT_CI_FILE"
+if command -v actionlint >/dev/null; then
+  if out=$(cd "$repo" && actionlint "$RT_CI_FILE" 2>&1); then pass "empty CI passes actionlint"; else fail "empty CI passes actionlint" "$out"; fi
+fi
+
+echo
+echo "Managed file guard"
+repo=$(new_repo)
+mk "$repo" "$RT_DEPENDABOT_FILE" "version: 2  # hand written"
+commit "$repo"
+if rt_write_managed "$repo" "$RT_DEPENDABOT_FILE" <<<"new" 2>/dev/null; then rc=0; else rc=$?; fi
+assert_eq "refuses to overwrite unmanaged file" "1 version: 2  # hand written" "$rc $(cat "$repo/$RT_DEPENDABOT_FILE")"
+RT_FORCE=1 rt_write_managed "$repo" "$RT_DEPENDABOT_FILE" <<<"# $RT_MARKER v1" 2>/dev/null
+assert_eq "--force overwrites" "# $RT_MARKER v1" "$(cat "$repo/$RT_DEPENDABOT_FILE")"
+rt_write_managed "$repo" "$RT_DEPENDABOT_FILE" <<<"# $RT_MARKER v2"
+assert_eq "managed file is updated without --force" "# $RT_MARKER v2" "$(cat "$repo/$RT_DEPENDABOT_FILE")"
+
+echo
+echo "PR publishing (dry run)"
+repo=$(new_repo)
+mk "$repo" README.md '# hi'
+commit "$repo"
+RT_DEFAULT_BRANCH=main RT_DRY_RUN=1
+out=$(rt_publish_pr "$repo" repo-tools/x "t" "b" README.md 2>&1)
+assert_contains "no change -> nothing to do" "already up to date" "$out"
+mk "$repo" "$RT_CI_FILE" "# $RT_MARKER"
+out=$(rt_publish_pr "$repo" repo-tools/x "t" "b" "$RT_CI_FILE" 2>&1)
+assert_contains "change -> would open PR" "would open a PR from 'repo-tools/x'" "$out"
+assert_contains "dry run shows the diff" "+# $RT_MARKER" "$out"
+RT_DRY_RUN=0
+
+echo
+echo "Renderer and reusable workflows agree on inputs"
+if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
+  for lang in "${RT_LANGS[@]}"; do
+    wf="$ROOT/.github/workflows/${RT_WORKFLOW[$lang]}"
+    want=(working-directory lint-command test-command build-command)
+    [[ -z ${RT_VERSION_KEY[$lang]:-} ]] || want+=("${RT_VERSION_KEY[$lang]#*:}")
+    case $lang in gradle | maven) want+=(build-tool) ;; esac
+    # PyYAML reads the bare `on:` key as boolean True.
+    missing=$(python3 - "$wf" "${want[@]}" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+on = doc.get("on", doc.get(True, {}))
+inputs = (on.get("workflow_call") or {}).get("inputs") or {}
+print(" ".join(i for i in sys.argv[2:] if i not in inputs))
+PY
+)
+    assert_eq "$lang -> ${RT_WORKFLOW[$lang]} accepts every input the renderer emits" "" "$missing"
+  done
+fi
+
+echo
+printf '%d passed, %d failed\n' "$PASS" "$FAIL"
+((FAIL == 0))

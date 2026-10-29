@@ -1,0 +1,124 @@
+# Reusable Terraform CI. Called by the repo-tools-ci.yml that bin/repo-ci generates.
+#
+# Lint:  terraform fmt -check, plus tflint (uses .tflint.hcl if present)
+# Build: init -backend=false + validate in every directory containing .tf files
+# Test:  terraform test in every directory containing .tftest.hcl files
+#
+# Each *-command input replaces its default step; "skip" disables it.
+name: Terraform
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory to scan for Terraform, relative to the repo root.
+        type: string
+        default: "."
+      terraform-version:
+        description: Terraform version. Empty uses .terraform-version, else latest.
+        type: string
+        default: ""
+      tflint:
+        description: Run tflint as part of lint.
+        type: boolean
+        default: true
+      lint-command:
+        type: string
+        default: ""
+      test-command:
+        type: string
+        default: ""
+      build-command:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "0"
+
+jobs:
+  check:
+    name: Lint, validate & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve Terraform version
+        id: tf
+        env:
+          REQUESTED: ${{ inputs.terraform-version }}
+        run: |
+          if [[ -n $REQUESTED ]]; then v=$REQUESTED
+          elif [[ -f .terraform-version ]]; then v=$(head -n1 .terraform-version)
+          else v=latest
+          fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ steps.tf.outputs.version }}
+          terraform_wrapper: false
+
+      - if: inputs.tflint
+        uses: terraform-linters/setup-tflint@v6
+
+      - name: Lint
+        env:
+          CMD: ${{ inputs.lint-command }}
+          TFLINT: ${{ inputs.tflint }}
+        run: |
+          case $CMD in
+            skip) echo "Lint skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          terraform fmt -check -recursive -diff
+          if [[ $TFLINT == true ]]; then
+            tflint --init
+            tflint --recursive --format compact
+          fi
+
+      - name: Validate
+        env:
+          CMD: ${{ inputs.build-command }}
+        run: |
+          case $CMD in
+            skip) echo "Validate skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          failed=0
+          while IFS= read -r d; do
+            echo "::group::$d"
+            if ! (cd "$d" && terraform init -backend=false -no-color >/dev/null && terraform validate -no-color); then
+              echo "::error::terraform validate failed in $d"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done < <(find . -name '*.tf' -not -path '*/.terraform/*' -printf '%h\n' | sort -u)
+          exit "$failed"
+
+      - name: Test
+        env:
+          CMD: ${{ inputs.test-command }}
+        run: |
+          case $CMD in
+            skip) echo "Tests skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          mapfile -t dirs < <(find . -name '*.tftest.hcl' -not -path '*/.terraform/*' -printf '%h\n' |
+            sed -E 's#/tests$##' | sort -u)
+          if ((${#dirs[@]} == 0)); then echo "No terraform tests"; exit 0; fi
+          for d in "${dirs[@]}"; do
+            echo "::group::$d"
+            (cd "$d" && terraform init -backend=false -no-color >/dev/null && terraform test -no-color)
+            echo "::endgroup::"
+          done

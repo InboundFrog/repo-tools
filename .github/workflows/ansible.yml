@@ -1,0 +1,80 @@
+# Reusable Ansible CI. Called by the repo-tools-ci.yml that bin/repo-ci generates.
+#
+# Lint:  ansible-lint (honours .ansible-lint; installs collections from
+#        requirements.yml itself, and includes yamllint + syntax checks)
+# Test / Build: nothing by default; set test-command (e.g. molecule) if needed.
+#
+# Each *-command input replaces its default step; "skip" disables it.
+name: Ansible
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Ansible project directory, relative to the repo root.
+        type: string
+        default: "."
+      python-version:
+        type: string
+        default: "3.13"
+      ansible-lint-version:
+        description: Pin ansible-lint (e.g. 25.9.0). Empty installs the latest.
+        type: string
+        default: ""
+      lint-command:
+        type: string
+        default: ""
+      test-command:
+        type: string
+        default: ""
+      build-command:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install ansible-lint
+        env:
+          VERSION: ${{ inputs.ansible-lint-version }}
+        run: python -m pip install --quiet "ansible-lint${VERSION:+==$VERSION}"
+
+      - name: Lint
+        env:
+          CMD: ${{ inputs.lint-command }}
+        run: |
+          case $CMD in
+            skip) echo "Lint skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          ansible-lint
+
+      - name: Test
+        if: inputs.test-command != '' && inputs.test-command != 'skip'
+        env:
+          CMD: ${{ inputs.test-command }}
+        run: eval "$CMD"
+
+      - name: Build
+        if: inputs.build-command != '' && inputs.build-command != 'skip'
+        env:
+          CMD: ${{ inputs.build-command }}
+        run: eval "$CMD"

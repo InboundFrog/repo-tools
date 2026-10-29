@@ -1,0 +1,153 @@
+# Reusable Node.js / TypeScript CI. Called by the repo-tools-ci.yml that bin/repo-ci generates.
+#
+# Package manager from the lockfile: pnpm-lock.yaml -> pnpm, yarn.lock -> yarn, else npm.
+# Lint:  runs whichever of the lint, typecheck, type-check and format:check scripts
+#        exist; with none, falls back to `tsc --noEmit` for TypeScript projects.
+# Test:  the test script, if any (npm's placeholder "no test specified" is ignored).
+# Build: the build script, if any.
+#
+# Each *-command input replaces its default step; "skip" disables it.
+name: Node
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Project directory, relative to the repo root.
+        type: string
+        default: "."
+      node-version:
+        description: Node version. Empty uses .nvmrc / .node-version, else the latest LTS.
+        type: string
+        default: ""
+      lint-command:
+        type: string
+        default: ""
+      test-command:
+        type: string
+        default: ""
+      build-command:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+jobs:
+  check:
+    name: Lint, test & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Detect toolchain
+        id: detect
+        env:
+          REQUESTED: ${{ inputs.node-version }}
+          WORKDIR: ${{ inputs.working-directory }}
+        run: |
+          if [[ -f pnpm-lock.yaml ]]; then pm=pnpm
+          elif [[ -f yarn.lock ]]; then pm=yarn
+          else pm=npm
+          fi
+          if [[ -n $REQUESTED ]]; then v=$REQUESTED
+          elif [[ -f .nvmrc ]]; then v=$(head -n1 .nvmrc)
+          elif [[ -f .node-version ]]; then v=$(head -n1 .node-version)
+          else v='lts/*'
+          fi
+          cache='' lock=''
+          if [[ $pm == npm && -f package-lock.json ]]; then
+            cache=npm lock="${WORKDIR%/}/package-lock.json"
+          fi
+          {
+            echo "pm=$pm"
+            echo "version=$v"
+            echo "cache=$cache"
+            echo "lockfile=$lock"
+          } >>"$GITHUB_OUTPUT"
+
+          # Helpers shared by the steps below.
+          cat >"$RUNNER_TEMP/node-helpers.sh" <<EOF
+          PM=$pm
+          EOF
+          cat >>"$RUNNER_TEMP/node-helpers.sh" <<'EOF'
+          has_script() {
+            node -e 'const s = (require("./package.json").scripts || {})[process.argv[1]];
+              process.exit(s && !/no test specified/.test(s) ? 0 : 1)' "$1"
+          }
+          run_script() { "$PM" run "$1"; }
+          EOF
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ steps.detect.outputs.version }}
+          cache: ${{ steps.detect.outputs.cache }}
+          cache-dependency-path: ${{ steps.detect.outputs.lockfile }}
+
+      - name: Install dependencies
+        run: |
+          source "$RUNNER_TEMP/node-helpers.sh"
+          if [[ $PM != npm ]]; then
+            command -v corepack >/dev/null || npm install -g corepack
+            corepack enable
+          fi
+          case $PM in
+            npm)
+              if [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then npm ci; else npm install; fi ;;
+            pnpm) pnpm install --frozen-lockfile ;;
+            yarn)
+              if [[ $(yarn --version) == 1.* ]]; then yarn install --frozen-lockfile
+              else yarn install --immutable
+              fi ;;
+          esac
+
+      - name: Lint
+        env:
+          CMD: ${{ inputs.lint-command }}
+        run: |
+          case $CMD in
+            skip) echo "Lint skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          source "$RUNNER_TEMP/node-helpers.sh"
+          ran=0
+          for s in lint typecheck type-check format:check; do
+            if has_script "$s"; then run_script "$s"; ran=1; fi
+          done
+          if ((!ran)) && [[ -f tsconfig.json && -x node_modules/.bin/tsc ]]; then
+            node_modules/.bin/tsc --noEmit
+          elif ((!ran)); then
+            echo "No lint scripts found"
+          fi
+
+      - name: Test
+        env:
+          CMD: ${{ inputs.test-command }}
+        run: |
+          case $CMD in
+            skip) echo "Tests skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          source "$RUNNER_TEMP/node-helpers.sh"
+          if has_script test; then run_script test; else echo "No test script"; fi
+
+      - name: Build
+        env:
+          CMD: ${{ inputs.build-command }}
+        run: |
+          case $CMD in
+            skip) echo "Build skipped"; exit 0 ;;
+            ?*) eval "$CMD"; exit ;;
+          esac
+          source "$RUNNER_TEMP/node-helpers.sh"
+          if has_script build; then run_script build; else echo "No build script"; fi

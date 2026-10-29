@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Show what repo-tools detects in a repo, and optionally the files it would write.
+set -euo pipefail
+
+RT_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+# shellcheck source=lib/common.sh
+source "$RT_ROOT/lib/common.sh"
+# shellcheck source=lib/detect.sh
+source "$RT_ROOT/lib/detect.sh"
+# shellcheck source=lib/render.sh
+source "$RT_ROOT/lib/render.sh"
+# shellcheck source=lib/gitops.sh
+source "$RT_ROOT/lib/gitops.sh"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [--render] PATH|REPO
+
+Prints the CI languages and Dependabot ecosystems repo-tools detects, after
+applying $RT_CONF_FILE. PATH is a local git checkout (no GitHub access
+needed); REPO is "owner/name" or "name" and is cloned.
+
+Options:
+  -r, --render   Also print the generated dependabot.yml and CI workflow
+  -h, --help     Show this help
+EOF
+}
+
+render=0 target=''
+while (($#)); do
+  case $1 in
+    -r | --render) render=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    -*) die "unknown option: $1" ;;
+    *) target=$1 ;;
+  esac
+  shift
+done
+[[ -n $target ]] || {
+  usage >&2
+  exit 1
+}
+rt_require git
+
+if [[ -d $target ]]; then
+  dir=$(cd "$target" && git rev-parse --show-toplevel) || die "$target is not a git checkout"
+  branch=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##') ||
+    true
+  branch=${branch:-$(git -C "$dir" branch --show-current)}
+  branch=${branch:-main}
+else
+  rt_require gh jq
+  rt_load_repo "$(rt_resolve_repo "$target")"
+  dir=$(rt_clone "$RT_REPO")
+  branch=$RT_DEFAULT_BRANCH
+fi
+
+rt_conf_load "$dir"
+if ((${#RT_CONF[@]})); then
+  echo "Config ($RT_CONF_FILE):"
+  for key in "${!RT_CONF[@]}"; do printf '  %s=%s\n' "$key" "${RT_CONF[$key]}"; done | sort
+  echo
+fi
+
+echo "CI jobs (language: directories):"
+plan=$(rt_ci_plan "$dir")
+if [[ -n $plan ]]; then awk -F'\t' '{ printf "  %-10s %s\n", $1, $2 }' <<<"$plan"; else echo "  (none)"; fi
+echo
+echo "Dependabot ecosystems (ecosystem: directories):"
+rt_detect_ecosystems "$dir" | awk -F'\t' '{ printf "  %-15s %s\n", $1, $2 }'
+
+if ((render)); then
+  printf '\n--- %s ---\n' "$RT_DEPENDABOT_FILE"
+  rt_render_dependabot "$dir"
+  printf '\n--- %s ---\n' "$RT_CI_FILE"
+  rt_render_ci "$dir" "$branch"
+fi

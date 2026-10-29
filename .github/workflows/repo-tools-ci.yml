@@ -1,0 +1,58 @@
+# CI for repo-tools itself. Hand-written (no "Managed by" marker), so running
+# bin/repo-ci against this repo leaves it alone. Exposes the same "CI OK"
+# check as generated workflows, so repo-protect works here too.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    # Dogfood the reusable workflow from this checkout.
+    uses: ./.github/workflows/shell.yml
+
+  tests:
+    name: Workflow lint & tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          bash <(curl -sSfL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") \
+            "$ACTIONLINT_VERSION" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP" >>"$GITHUB_PATH"
+
+      - name: Lint workflows
+        run: actionlint -color
+
+      - name: Run tests
+        run: tests/run-tests.sh
+
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs: [shell, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<<"$NEEDS" >/dev/null
