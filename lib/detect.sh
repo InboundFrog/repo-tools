@@ -66,7 +66,7 @@ rt_detect_langs() {
   local dir=$1 files dirs
   files=$(_rt_files "$dir")
 
-  _emit() { [[ -n $2 ]] && printf '%s\t%s\n' "$1" "$(paste -sd, - <<<"$2")"; }
+  _emit() { [[ -z $2 ]] || printf '%s\t%s\n' "$1" "$(paste -sd, - <<<"$2")"; }
 
   # Python: needs project metadata, or requirements files plus actual .py code.
   dirs=$(_rt_match "$files" '(^|/)(pyproject\.toml|setup\.py|setup\.cfg|Pipfile)$' | _rt_dirs)
@@ -103,7 +103,7 @@ rt_detect_ecosystems() {
   local dir=$1 files uv_dirs pip_dirs d u under
 
   files=$(_rt_files "$dir")
-  _emit() { [[ -n $2 ]] && printf '%s\t%s\n' "$1" "$(paste -sd, - <<<"$2")"; }
+  _emit() { [[ -z $2 ]] || printf '%s\t%s\n' "$1" "$(paste -sd, - <<<"$2")"; }
 
   _emit github-actions .
   _emit npm "$(_rt_match "$files" '(^|/)package\.json$' | _rt_dirs | _rt_rootmost)"

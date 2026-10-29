@@ -12,6 +12,8 @@ source "$ROOT/lib/detect.sh"
 source "$ROOT/lib/render.sh"
 # shellcheck source=lib/gitops.sh
 source "$ROOT/lib/gitops.sh"
+# shellcheck source=lib/compare.sh
+source "$ROOT/lib/compare.sh"
 
 PASS=0 FAIL=0
 pass() {
@@ -113,6 +115,51 @@ validate_yaml "rendered CI" "$repo/$RT_CI_FILE"
 validate_yaml "rendered dependabot.yml" "$repo/$RT_DEPENDABOT_FILE"
 if command -v actionlint >/dev/null; then
   if out=$(cd "$repo" && actionlint "$RT_CI_FILE" 2>&1); then pass "rendered CI passes actionlint"; else fail "rendered CI passes actionlint" "$out"; fi
+fi
+
+echo
+echo "Single-language repo (most ecosystems absent)"
+repo=$(new_repo)
+mk "$repo" Cargo.toml '[package]'
+mk "$repo" src/main.rs
+commit "$repo"
+# Consumed via process substitution under set -e, as the renderers do: a
+# helper returning non-zero for an absent ecosystem used to stop detection.
+mapfile -t got < <(rt_detect_ecosystems "$repo")
+assert_eq "ecosystems survive absent ones" "$(printf '%s\t%s\n' github-actions . cargo .)" "$(printf '%s\n' "${got[@]}")"
+mapfile -t got < <(rt_detect_langs "$repo")
+assert_eq "languages survive absent ones" "$(printf '%s\t%s' rust .)" "${got[*]}"
+RT_CONF=()
+assert_contains "rendered dependabot includes cargo" "package-ecosystem: cargo" "$(rt_render_dependabot "$repo")"
+
+echo
+echo "Comparing with an existing dependabot.yml"
+mk "$repo" "$RT_DEPENDABOT_FILE" "version: 2
+registries:
+  crates: {type: cargo-registry, url: https://example.com}
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule: {interval: daily}
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: rand
+        update-types: [version-update:semver-major]
+  - package-ecosystem: npm
+    directory: /web
+    schedule: {interval: weekly}
+"
+rt_render_dependabot "$repo" >"$(rt_tmpdir)/generated.yml"
+if rt_yaml_to_json "$repo/$RT_DEPENDABOT_FILE" >/dev/null 2>&1; then
+  report=$(rt_compare_dependabot "$repo/$RT_DEPENDABOT_FILE" "$(rt_tmpdir)/generated.yml")
+  assert_contains "ecosystem only repo-tools covers" "+ github-actions  not covered" "$report"
+  assert_contains "ecosystem only existing covers" "- npm  only in the existing config" "$report"
+  assert_contains "shared directory" "= directories  /" "$report"
+  assert_contains "interval difference" "~ interval     existing daily, repo-tools weekly" "$report"
+  assert_contains "groups repo-tools adds" "+ groups       cargo-minor-patch" "$report"
+  assert_contains "ignore rules would be lost" "- ignore       rand (major)" "$report"
+  assert_contains "unknown keys would be lost" "- other keys   open-pull-requests-limit" "$report"
+  assert_contains "top-level keys would be lost" "top-level keys only in existing: registries" "$report"
 fi
 
 echo

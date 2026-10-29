@@ -11,7 +11,7 @@ which is how updates get rolled out to repos you've already configured.
 | `bin/repo-ci` | Opens a PR adding `.github/workflows/repo-tools-ci.yml`, which runs lint, test and build for each detected language |
 | `bin/repo-protect` | Turns on delete-branch-on-merge; on public repos, also secret scanning, push protection, private vulnerability reporting and a default-branch ruleset |
 | `bin/repo-apply` | Runs all three across one repo, a list, or `--all` of your repos |
-| `bin/repo-detect` | Shows what would be detected and generated, from a local checkout or a repo. Changes nothing |
+| `bin/repo-detect` | Shows what would be detected and generated, from a local checkout or a repo. With `--compare`, sets it against the repo's existing `dependabot.yml` and workflows. Changes nothing |
 
 ## Requirements
 
@@ -24,6 +24,7 @@ which is how updates get rolled out to repos you've already configured.
 git clone https://github.com/InboundFrog/repo-tools && cd repo-tools
 
 bin/repo-detect ~/src/my-project --render   # preview, no GitHub access needed
+bin/repo-detect ~/src/my-project --compare  # vs the repo's existing dependabot.yml / workflows
 bin/repo-apply --dry-run my-project          # show the API calls and diffs
 bin/repo-apply my-project                    # do it
 # merge the two PRs it opens, then:
@@ -84,7 +85,11 @@ DEPENDABOT_EXCLUDE=docker
 ```
 
 Existing files without the header (e.g. a hand-written `dependabot.yml`) are
-left alone with a warning. Use `--force` to replace them. Existing workflows
+left alone with a warning. For `dependabot.yml`, `repo-dependabot` also prints
+a per-ecosystem comparison: what repo-tools would add, and what would be lost
+by replacing it (ignore rules, extra keys, ecosystems it didn't detect). Use
+`--force` to replace them. The comparison needs `yq` or python3 with PyYAML;
+without either it falls back to a plain diff. Existing workflows
 like `ci.yml` aren't touched, so remove them yourself if they duplicate the
 new one.
 

@@ -11,10 +11,12 @@ source "$RT_ROOT/lib/detect.sh"
 source "$RT_ROOT/lib/render.sh"
 # shellcheck source=lib/gitops.sh
 source "$RT_ROOT/lib/gitops.sh"
+# shellcheck source=lib/compare.sh
+source "$RT_ROOT/lib/compare.sh"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--render] PATH|REPO
+Usage: $(basename "$0") [--render] [--compare] PATH|REPO
 
 Prints the CI languages and Dependabot ecosystems repo-tools detects, after
 applying $RT_CONF_FILE. PATH is a local git checkout (no GitHub access
@@ -22,14 +24,17 @@ needed); REPO is "owner/name" or "name" and is cloned.
 
 Options:
   -r, --render   Also print the generated dependabot.yml and CI workflow
+  -c, --compare  Compare an existing dependabot.yml with the generated one, and
+                 list existing workflows alongside the generated CI jobs
   -h, --help     Show this help
 EOF
 }
 
-render=0 target=''
+render=0 compare=0 target=''
 while (($#)); do
   case $1 in
     -r | --render) render=1 ;;
+    -c | --compare) compare=1 ;;
     -h | --help)
       usage
       exit 0
@@ -77,4 +82,19 @@ if ((render)); then
   rt_render_dependabot "$dir"
   printf '\n--- %s ---\n' "$RT_CI_FILE"
   rt_render_ci "$dir" "$branch"
+fi
+
+if ((compare)); then
+  printf '\n--- %s: existing vs repo-tools ---\n' "$RT_DEPENDABOT_FILE"
+  if [[ -f $dir/$RT_DEPENDABOT_FILE ]]; then
+    grep -qF "$RT_MARKER" "$dir/$RT_DEPENDABOT_FILE" &&
+      echo "  (existing file is managed by repo-tools; it will be replaced)"
+    rt_render_dependabot "$dir" >"$(rt_tmpdir)/dependabot.yml"
+    rt_compare_dependabot "$dir/$RT_DEPENDABOT_FILE" "$(rt_tmpdir)/dependabot.yml"
+  else
+    echo "  (none yet; repo-tools would add one)"
+  fi
+
+  printf '\n--- workflows: existing vs repo-tools ---\n'
+  rt_list_workflows "$dir" "$plan"
 fi

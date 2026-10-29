@@ -11,6 +11,8 @@ source "$RT_ROOT/lib/detect.sh"
 source "$RT_ROOT/lib/render.sh"
 # shellcheck source=lib/gitops.sh
 source "$RT_ROOT/lib/gitops.sh"
+# shellcheck source=lib/compare.sh
+source "$RT_ROOT/lib/compare.sh"
 
 usage() {
   cat <<EOF
@@ -24,6 +26,7 @@ REPO is "owner/name", or "name" for repos you own.
 Options:
   -n, --dry-run   Show what would change without changing anything
   -f, --force     Replace an existing dependabot.yml not created by repo-tools
+                  (without it, a comparison with the generated file is shown)
   -h, --help      Show this help
 EOF
 }
@@ -42,6 +45,11 @@ process() {
   dir=$(rt_clone "$RT_REPO")
   rt_conf_load "$dir"
   content=$(rt_render_dependabot "$dir")
+  if [[ -f $dir/$RT_DEPENDABOT_FILE ]] && ! grep -qF "$RT_MARKER" "$dir/$RT_DEPENDABOT_FILE"; then
+    info "existing $RT_DEPENDABOT_FILE compared with what repo-tools would generate:"
+    printf '%s\n' "$content" >"$(rt_tmpdir)/dependabot.yml"
+    rt_compare_dependabot "$dir/$RT_DEPENDABOT_FILE" "$(rt_tmpdir)/dependabot.yml" | sed 's/^/  /' >&2
+  fi
   rt_write_managed "$dir" "$RT_DEPENDABOT_FILE" <<<"$content" || return 0
 
   ecosystems=$(rt_detect_ecosystems "$dir" | awk -F'\t' '{ printf "- `%s`: %s\n", $1, $2 }')
