@@ -120,6 +120,7 @@ EOF
 # (branch names, PR titles) into a command that the reusable workflow evals.
 # Refuse instead; commands can read the same data from the environment
 # (e.g. $GITHUB_HEAD_REF), which isn't re-parsed as code.
+# shellcheck disable=SC2016 # '${{' is a literal GitHub expression opener, not shell
 _rt_check_no_expressions() { # PLAN
   local key
   for key in "${!RT_CONF[@]}"; do

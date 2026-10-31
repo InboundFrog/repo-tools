@@ -244,6 +244,7 @@ rt_md_plan() {
       d=${d//\`/\'}
       out+="${out:+, }\`$d\`"
     done < <(tr ',' '\n' <<<"$dirs")
+    # shellcheck disable=SC2016 # Markdown backticks
     printf -- '- `%s`: %s\n' "$name" "$out"
   done
 }
