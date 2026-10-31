@@ -163,6 +163,26 @@ if rt_yaml_to_json "$repo/$RT_DEPENDABOT_FILE" >/dev/null 2>&1; then
 fi
 
 echo
+echo "Standalone Python scripts"
+repo=$(new_repo)
+mk "$repo" Cargo.toml '[package]'
+mk "$repo" tools/gen_maps.py 'print()'
+mk "$repo" tests/fixtures/x.py 'print()'                # fixtures are ignored
+commit "$repo"
+assert_eq "scripts without a project -> one python job at the root" \
+  "$(printf '%s\t%s\n' python . rust .)" "$(rt_detect_langs "$repo")"
+assert_eq "no pip ecosystem without a manifest" \
+  "$(printf '%s\t%s\n' github-actions . cargo .)" "$(rt_detect_ecosystems "$repo")"
+mk "$repo" svc/pyproject.toml '[project]'
+commit "$repo"
+assert_eq "a python project takes over from the root fallback" \
+  "$(printf '%s\t%s\n' python svc rust .)" "$(rt_detect_langs "$repo")"
+repo=$(new_repo)
+mk "$repo" tests/fixtures/only.py 'print()'
+commit "$repo"
+assert_eq "only ignored .py files -> no python job" "" "$(rt_detect_langs "$repo")"
+
+echo
 echo "Config overrides (.github/repo-tools.conf)"
 repo=$(new_repo)
 mk "$repo" pyproject.toml '[project]'

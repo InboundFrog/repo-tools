@@ -56,6 +56,10 @@ lives in this repo's [reusable workflows](.github/workflows):
 | Ansible | `ansible.yml` | ansible-lint | none by default | none by default |
 | Shell | `shell.yml` | shellcheck | bats, if `*.bats` exist | none |
 
+A repo with `.py` files but no Python project (`pyproject.toml`, `setup.py`,
+requirements files, ...) still gets a Python job at the root, so helper scripts
+are linted; with nothing to test or build, those steps pass.
+
 Package managers and toolchain versions are picked up from the project (lockfiles,
 `.python-version`, `.nvmrc`, `.java-version`, `rust-toolchain.toml`, `.terraform-version`, ...).
 Every workflow can install Ubuntu packages first (`APT_PACKAGES`), for native
