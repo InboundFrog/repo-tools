@@ -18,6 +18,22 @@ on:
         description: Space-separated Ubuntu packages to install first (e.g. "libudev-dev pkg-config").
         type: string
         default: ""
+      runs-on:
+        description: Runner for the job (e.g. macos-latest). System packages are only installed on Linux.
+        type: string
+        default: ubuntu-latest
+      extra-command:
+        description: Runs after lint, test and build (e.g. "ci/smoke.sh"), in the working directory.
+        type: string
+        default: ""
+      artifact-paths:
+        description: Files, directories or globs to upload once the job passes, relative to the working directory. Space or newline separated.
+        type: string
+        default: ""
+      artifact-name:
+        description: Artifact name prefix; the runner OS and working directory are appended so matrix entries don't clash.
+        type: string
+        default: build
       terraform-version:
         description: Terraform version. Empty uses .terraform-version, else latest.
         type: string
@@ -46,7 +62,7 @@ env:
 jobs:
   check:
     name: Lint, validate & test
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30
     defaults:
       run:
@@ -57,8 +73,43 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up failure annotations
+        run: |
+          # Writes the rt-run step shell used below; see the comment inside it.
+          mkdir -p "$RUNNER_TEMP/rt-bin"
+          cat >"$RUNNER_TEMP/rt-bin/rt-run" <<'RT_EOF'
+          #!/usr/bin/env bash
+          # Step shell ("shell: rt-run TITLE {0}"): runs the step script the way GitHub's
+          # bash shell does and, if it fails, repeats the important part of its output
+          # as an error annotation, so the failure can be read through the checks API
+          # without downloading the log. Portable to bash 3.2 and BSD tools (macOS).
+          script=${!#}
+          title=${*:1:$#-1}
+          log=$(mktemp)
+          bash --noprofile --norc -eo pipefail "$script" 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            esc=$(printf '\033')
+            clean=$(sed -E "s/${esc}\[[0-9;]*[A-Za-z]//g" "$log" |
+              grep -v -E '^[[:space:]]*(Compiling|Checking|Downloaded|Downloading|Updating|Locking|Adding|Fresh|Blocking|Running|Finished|Installing|Installed|Resolved|Prepared|Audited) ' || true)
+            # Prefer everything from the first compiler-style diagnostic onwards,
+            # else the end of the output.
+            diag=$(printf '%s\n' "$clean" | sed -n -E '/^(error|warning)(\[|:)/,$p' | head -n 200)
+            body=${diag:-$(printf '%s\n' "$clean" | tail -n 100)}
+            body=$(printf '%s' "$body" | head -c 30000)
+            body=${body//'%'/'%25'}
+            body=${body//$'\r'/'%0D'}
+            body=${body//$'\n'/'%0A'}
+            echo "::error title=${title:-Step} failed (exit $status)::$body"
+          fi
+          rm -f "$log"
+          exit "$status"
+          RT_EOF
+          chmod +x "$RUNNER_TEMP/rt-bin/rt-run"
+          echo "$RUNNER_TEMP/rt-bin" >>"$GITHUB_PATH"
+
       - name: Install system packages
-        if: inputs.apt-packages != ''
+        if: inputs.apt-packages != '' && runner.os == 'Linux'
         env:
           PACKAGES: ${{ inputs.apt-packages }}
         run: |
@@ -89,6 +140,7 @@ jobs:
         uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
 
       - name: Lint
+        shell: rt-run Lint {0}
         env:
           CMD: ${{ inputs.lint-command }}
           TFLINT: ${{ inputs.tflint }}
@@ -104,6 +156,7 @@ jobs:
           fi
 
       - name: Validate
+        shell: rt-run Validate {0}
         env:
           CMD: ${{ inputs.build-command }}
         run: |
@@ -123,6 +176,7 @@ jobs:
           exit "$failed"
 
       - name: Test
+        shell: rt-run Test {0}
         env:
           CMD: ${{ inputs.test-command }}
         run: |
@@ -130,11 +184,52 @@ jobs:
             skip) echo "Tests skipped"; exit 0 ;;
             ?*) eval "$CMD"; exit ;;
           esac
-          mapfile -t dirs < <(find . -name '*.tftest.hcl' -not -path '*/.terraform/*' -printf '%h\n' |
-            sed -E 's#/tests$##' | sort -u)
+          # Portable to macOS runners: bash 3.2 (no mapfile) and BSD find (no -printf).
+          dirs=()
+          while IFS= read -r d; do dirs+=("$d"); done < <(
+            find . -name '*.tftest.hcl' -not -path '*/.terraform/*' -exec dirname {} \; |
+              sed -E 's#/tests$##' | sort -u
+          )
           if ((${#dirs[@]} == 0)); then echo "No terraform tests"; exit 0; fi
           for d in "${dirs[@]}"; do
             echo "::group::$d"
             (cd "$d" && terraform init -backend=false -no-color >/dev/null && terraform test -no-color)
             echo "::endgroup::"
           done
+
+      - name: Extra checks
+        shell: rt-run Extra checks {0}
+        if: inputs.extra-command != '' && inputs.extra-command != 'skip'
+        env:
+          CMD: ${{ inputs.extra-command }}
+        run: eval "$CMD"
+
+      - name: Prepare artifact
+        id: artifact
+        if: inputs.artifact-paths != ''
+        env:
+          PATHS: ${{ inputs.artifact-paths }}
+          NAME: ${{ inputs.artifact-name }}
+          WORKDIR: ${{ inputs.working-directory }}
+        run: |
+          # upload-artifact resolves paths from the workspace root, not the working directory.
+          dir=${WORKDIR#./}
+          dir=${dir%/}
+          [[ $dir != . ]] || dir=''
+          read -ra paths <<<"${PATHS//$'\n'/ }"
+          {
+            echo 'paths<<RT_EOF'
+            for p in "${paths[@]}"; do printf '%s%s\n' "${dir:+$dir/}" "$p"; done
+            echo 'RT_EOF'
+          } >>"$GITHUB_OUTPUT"
+          os=$(tr '[:upper:]' '[:lower:]' <<<"$RUNNER_OS")
+          name="${NAME:-build}-$os${dir:+-$dir}"
+          echo "name=${name//\//-}" >>"$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        if: steps.artifact.outputs.name != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.artifact.outputs.paths }}
+          if-no-files-found: error

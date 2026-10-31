@@ -163,6 +163,26 @@ if rt_yaml_to_json "$repo/$RT_DEPENDABOT_FILE" >/dev/null 2>&1; then
 fi
 
 echo
+echo "Standalone Python scripts"
+repo=$(new_repo)
+mk "$repo" Cargo.toml '[package]'
+mk "$repo" tools/gen_maps.py 'print()'
+mk "$repo" tests/fixtures/x.py 'print()'                # fixtures are ignored
+commit "$repo"
+assert_eq "scripts without a project -> one python job at the root" \
+  "$(printf '%s\t%s\n' python . rust .)" "$(rt_detect_langs "$repo")"
+assert_eq "no pip ecosystem without a manifest" \
+  "$(printf '%s\t%s\n' github-actions . cargo .)" "$(rt_detect_ecosystems "$repo")"
+mk "$repo" svc/pyproject.toml '[project]'
+commit "$repo"
+assert_eq "a python project takes over from the root fallback" \
+  "$(printf '%s\t%s\n' python svc rust .)" "$(rt_detect_langs "$repo")"
+repo=$(new_repo)
+mk "$repo" tests/fixtures/only.py 'print()'
+commit "$repo"
+assert_eq "only ignored .py files -> no python job" "" "$(rt_detect_langs "$repo")"
+
+echo
 echo "Config overrides (.github/repo-tools.conf)"
 repo=$(new_repo)
 mk "$repo" pyproject.toml '[project]'
@@ -211,6 +231,7 @@ mk "$repo" "$RT_CONF_FILE" "APT_PACKAGES=libudev-dev, pkg-config
 PYTHON_APT_PACKAGES=libpq-dev
 RUST_VERSION=1.96
 RUST_AUDIT=skip
+RUST_MSRV=skip
 DEPENDABOT_IGNORE_CARGO=rand:minor+major windows-*
 DEPENDABOT_IGNORE_GITHUB_ACTIONS=actions/checkout:major
 "
@@ -224,6 +245,7 @@ assert_contains "global APT_PACKAGES, space separated" "apt-packages: 'libudev-d
 assert_contains "per-language APT_PACKAGES wins" "apt-packages: 'libpq-dev'" "$python_job"
 assert_contains "RUST_VERSION -> toolchain" "toolchain: '1.96'" "$rust_job"
 assert_contains "RUST_AUDIT -> audit-command" "audit-command: 'skip'" "$rust_job"
+assert_contains "RUST_MSRV -> msrv-command" "msrv-command: 'skip'" "$rust_job"
 assert_contains "ignore with update types" "- dependency-name: 'rand'
         update-types: ['version-update:semver-minor', 'version-update:semver-major']" "$dep"
 assert_contains "ignore without update types" "- dependency-name: 'windows-*'" "$dep"
@@ -249,6 +271,66 @@ if rt_yaml_to_json "$repo/$RT_DEPENDABOT_FILE" >/dev/null 2>&1; then
   assert_contains "ignore rule on both sides (order-insensitive)" "= ignore       rand (major, minor)" "$report"
   assert_contains "ignore rule only in existing" "- ignore       old-crate" "$report"
   assert_contains "ignore rule only in repo-tools" "+ ignore       windows-*" "$report"
+fi
+
+echo
+echo "Runner OS matrix, extra command and artifacts"
+repo=$(new_repo)
+mk "$repo" Cargo.toml '[package]'
+mk "$repo" Cargo.lock
+mk "$repo" tools/a.py 'print()'
+mk "$repo" "$RT_CONF_FILE" "OS=ubuntu-latest, macos-latest
+PYTHON_OS=ubuntu-latest
+RUST_EXTRA=ci/smoke.sh
+RUST_BUILD=cargo build --release --locked
+RUST_ARTIFACTS=target/release/tvmap, tvmap-out/
+"
+commit "$repo"
+rt_conf_load "$repo"
+ci=$(rt_render_ci "$repo" main)
+rust_job=$(sed -n '/^  rust:/,/^$/p' <<<"$ci")
+python_job=$(sed -n '/^  python:/,/^$/p' <<<"$ci")
+assert_contains "OS -> os matrix" "        os: ['ubuntu-latest', 'macos-latest']" "$rust_job"
+assert_contains "os matrix feeds runs-on" "      runs-on: \${{ matrix.os }}" "$rust_job"
+assert_contains "<LANG>_OS wins over OS" "        os: ['ubuntu-latest']" "$python_job"
+assert_contains "RUST_EXTRA -> extra-command" "extra-command: 'ci/smoke.sh'" "$rust_job"
+assert_contains "artifacts named after the language" "artifact-name: 'rust'" "$rust_job"
+assert_contains "artifact paths space separated" "artifact-paths: 'target/release/tvmap tvmap-out/'" "$rust_job"
+assert_not_contains "no artifacts unless configured" "artifact-" "$python_job"
+mkdir -p "$repo/.github/workflows" && printf '%s\n' "$ci" >"$repo/$RT_CI_FILE"
+validate_yaml "CI with OS matrix" "$repo/$RT_CI_FILE"
+if command -v actionlint >/dev/null; then
+  if out=$(cd "$repo" && actionlint "$RT_CI_FILE" 2>&1); then pass "CI with OS matrix passes actionlint"; else fail "CI with OS matrix passes actionlint" "$out"; fi
+fi
+out=$(rt_list_workflows "$repo" "$(rt_ci_plan "$repo")")
+assert_contains "compare lists the runners" "      os: ubuntu-latest macos-latest" "$out"
+assert_contains "compare lists the extra command" "      extra: ci/smoke.sh" "$out"
+assert_contains "compare lists artifacts" "      artifacts: target/release/tvmap tvmap-out/" "$out"
+RT_CONF=()
+assert_not_contains "no os matrix by default" "os:" "$(rt_render_ci "$repo" main)"
+
+# The "Prepare artifact" step is copied into every reusable workflow: check the
+# copies match, then run one.
+if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
+  scripts=$(python3 - "$ROOT"/.github/workflows/{python,node,rust,jvm,terraform,ansible,shell}.yml <<'PY'
+import sys, yaml
+runs = set()
+for f in sys.argv[1:]:
+    steps = yaml.safe_load(open(f))["jobs"]["check"]["steps"]
+    runs.update(s["run"] for s in steps if s.get("id") == "artifact")
+print(len(runs))
+print(next(iter(runs)), end="")
+PY
+  )
+  assert_eq "Prepare artifact step identical in every workflow" "1" "$(head -n1 <<<"$scripts")"
+  tail -n +2 <<<"$scripts" >"$(rt_tmpdir)/artifact.sh"
+  out=$(GITHUB_OUTPUT="$(rt_tmpdir)/artifact.out" RUNNER_OS=macOS NAME=rust WORKDIR=./tools/cli/ \
+    PATHS=$'target/release/x\ndist/*.tar.gz' bash -eo pipefail "$(rt_tmpdir)/artifact.sh" && cat "$(rt_tmpdir)/artifact.out")
+  assert_eq "artifact paths prefixed with the working directory; name made unique" \
+    "$(printf '%s\n' 'paths<<RT_EOF' tools/cli/target/release/x 'tools/cli/dist/*.tar.gz' RT_EOF name=rust-macos-tools-cli)" "$out"
+  out=$(GITHUB_OUTPUT="$(rt_tmpdir)/artifact2.out" RUNNER_OS=Linux NAME='' WORKDIR=. PATHS='a b' \
+    bash -eo pipefail "$(rt_tmpdir)/artifact.sh" && cat "$(rt_tmpdir)/artifact2.out")
+  assert_eq "artifact at the repo root" "$(printf '%s\n' 'paths<<RT_EOF' a b RT_EOF name=build-linux)" "$out"
 fi
 
 echo
@@ -296,11 +378,60 @@ assert_contains "dry run shows the diff" "+# $RT_MARKER" "$out"
 RT_DRY_RUN=0
 
 echo
+echo "Listing existing workflows next to the generated jobs"
+repo=$(new_repo)
+mk "$repo" run.sh 'echo'
+commit "$repo"
+RT_CONF=()
+out=$(rt_list_workflows "$repo" "$(rt_ci_plan "$repo")")
+assert_contains "no workflows yet" "  (none)" "$out"
+assert_contains "bats reported as skipped without *.bats files" "test: bats (skipped: no *.bats files)" "$out"
+mk "$repo" test/run.bats '@test "x" { true; }'
+commit "$repo"
+out=$(rt_list_workflows "$repo" "$(rt_ci_plan "$repo")")
+assert_contains "bats reported when *.bats files exist" "      test: bats" "$out"
+assert_not_contains "no skipped note with *.bats files" "skipped: no *.bats" "$out"
+
+echo
+echo "Replacing hand-written workflows (REPLACE_WORKFLOWS)"
+repo=$(new_repo)
+mk "$repo" Cargo.toml '[package]'
+mk "$repo" .github/workflows/ci.yml $'name: CI\non: [push, pull_request]\njobs: {}\n'
+mk "$repo" .github/workflows/tests.yaml $'on:\n  pull_request:\njobs: {}\n'
+mk "$repo" .github/workflows/release.yml $'on:\n  push:\n    tags: ["v*"]\njobs: {}\n'
+mk "$repo" .github/workflows/push.yml $'on:\n  push:\n    branches: [main]\n    tags: ["v*"]\njobs: {}\n'
+mk "$repo" .github/workflows/nightly.yml $'on:\n  schedule:\n    - cron: "0 3 * * *"\njobs: {}\n'
+mk "$repo" "$RT_CI_FILE" "# $RT_MARKER"
+mk "$repo" "$RT_CONF_FILE" "REPLACE_WORKFLOWS=ci.yml, .github/workflows/gone.yml, ../../etc/passwd, repo-tools-ci.yml"
+commit "$repo"
+rt_conf_load "$repo"
+if rt_yaml_to_json "$repo/.github/workflows/ci.yml" >/dev/null 2>&1; then
+  assert_eq "unlisted push/pull_request workflows flagged; tag-only, schedule-only and managed ones not" \
+    "$(printf '%s\n' push.yml tests.yaml)" "$(rt_overlapping_workflows "$repo" | sort)"
+  out=$(rt_list_workflows "$repo" "$(rt_ci_plan "$repo")")
+  assert_contains "compare marks listed workflows for removal" "ci.yml  (in REPLACE_WORKFLOWS; repo-ci would remove it)" "$out"
+fi
+removed=$(rt_replace_workflows "$repo" 2>"$(rt_tmpdir)/replace.err")
+err=$(cat "$(rt_tmpdir)/replace.err")
+assert_eq "only the listed, existing, unmanaged workflow is removed" ".github/workflows/ci.yml" "$removed"
+assert_eq "removed from the checkout" "no" "$([[ -e $repo/.github/workflows/ci.yml ]] && echo yes || echo no)"
+assert_contains "path outside .github/workflows refused" "'../../etc/passwd' isn't a workflow file name" "$err"
+assert_contains "repo-tools' own workflow kept" "$RT_CI_FILE is managed by repo-tools; not removing it" "$err"
+assert_contains "missing workflow is fine" ".github/workflows/gone.yml is already gone" "$err"
+assert_eq "managed CI untouched" "# $RT_MARKER" "$(cat "$repo/$RT_CI_FILE")"
+RT_DEFAULT_BRANCH=main RT_DRY_RUN=1
+out=$(rt_publish_pr "$repo" repo-tools/ci "t" "b" "$RT_CI_FILE" "$removed" 2>&1)
+assert_contains "the deletion goes into the PR" "-name: CI" "$out"
+assert_contains "dry run lists the deleted file" ".github/workflows/ci.yml" "$out"
+RT_DRY_RUN=0
+
+echo
 echo "Renderer and reusable workflows agree on inputs"
 if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
   for lang in "${RT_LANGS[@]}"; do
     wf="$ROOT/.github/workflows/${RT_WORKFLOW[$lang]}"
-    want=(working-directory apt-packages lint-command test-command build-command)
+    want=(working-directory apt-packages lint-command test-command build-command
+      extra-command runs-on artifact-name artifact-paths)
     for pair in ${RT_INPUT_KEYS[$lang]:-}; do want+=("${pair#*:}"); done
     case $lang in gradle | maven) want+=(build-tool) ;; esac
     # PyYAML reads the bare `on:` key as boolean True.
@@ -315,6 +446,93 @@ PY
     assert_eq "$lang -> ${RT_WORKFLOW[$lang]} accepts every input the renderer emits" "" "$missing"
   done
 fi
+
+echo
+echo "Failure annotations (rt-run step shell)"
+if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
+  wrapped="$(rt_tmpdir)/wrapped"
+  mkdir -p "$wrapped"
+  # Writes each workflow's rt-run script and every step run through it; prints
+  # how many distinct rt-run scripts there are, then any job missing the setup.
+  out=$(python3 - "$wrapped" "$ROOT"/.github/workflows/{python,node,rust,jvm,terraform,ansible,shell}.yml <<'PY'
+import os, re, sys, yaml
+dest, files = sys.argv[1], sys.argv[2:]
+scripts, problems = set(), []
+for f in files:
+    wf = os.path.basename(f)
+    for job_id, job in yaml.safe_load(open(f))["jobs"].items():
+        steps = job.get("steps", [])
+        setup = [s for s in steps if s.get("name") == "Set up failure annotations"]
+        users = [s for s in steps if str(s.get("shell", "")).startswith("rt-run ")]
+        if users and not setup:
+            problems.append(f"{wf}:{job_id} uses rt-run without setting it up")
+        for s in setup:
+            m = re.search(r"<<'RT_EOF'\n(.*?)\nRT_EOF\n", s["run"], re.S)
+            scripts.add(m.group(1) + "\n")
+        for i, s in enumerate(users):
+            if not s["shell"].endswith(" {0}"):
+                problems.append(f"{wf}:{job_id}:{s['name']}: shell must end in {{0}}")
+            open(os.path.join(dest, f"{wf}-{job_id}-{i}.sh"), "w").write(s["run"])
+open(os.path.join(dest, "rt-run"), "w").write(next(iter(scripts)))
+print(len(scripts))
+print("\n".join(problems))
+PY
+  )
+  assert_eq "rt-run script identical in every workflow" "1" "$(head -n1 <<<"$out")"
+  assert_eq "every job using rt-run sets it up" "" "$(tail -n +2 <<<"$out")"
+  chmod +x "$wrapped/rt-run"
+  if command -v shellcheck >/dev/null; then
+    # actionlint only shellchecks steps whose shell is bash, so check these here
+    # (SC1091: sourced helpers live on the runner; actionlint skips it too).
+    if out=$(shellcheck -s bash -e SC1091,SC2148 "$wrapped"/*.sh "$wrapped/rt-run" 2>&1); then
+      pass "steps run through rt-run pass shellcheck"
+    else
+      fail "steps run through rt-run pass shellcheck" "$out"
+    fi
+  fi
+  printf '%s\n' 'echo "   Compiling foo v1.0.0"' 'echo noise' \
+    "printf '\\033[1;31merror[E0308]\\033[0m: mismatched types (100%%)\\n'" 'echo "  --> src/main.rs:3:5"' \
+    'false' 'echo not reached' >"$wrapped/fail.sh"
+  if out=$("$wrapped/rt-run" Lint "$wrapped/fail.sh" 2>&1); then rc=0; else rc=$?; fi
+  assert_eq "rt-run keeps the step's exit status" "1" "$rc"
+  assert_contains "step output still printed" "noise" "$out"
+  assert_contains "annotation from the first diagnostic, colour stripped, escaped" \
+    "::error title=Lint failed (exit 1)::error[E0308]: mismatched types (100%25)%0A  --> src/main.rs:3:5" "$out"
+  assert_not_contains "-e stops the script, as with GitHub's bash" "not reached" "$out"
+  printf '%s\n' 'echo one' 'echo two' 'exit 3' >"$wrapped/plain.sh"
+  out=$("$wrapped/rt-run" Extra checks "$wrapped/plain.sh" 2>&1) || rc=$?
+  assert_eq "exit status passed through" "3" "$rc"
+  assert_contains "no diagnostic: end of output; multi-word title" "::error title=Extra checks failed (exit 3)::one%0Atwo" "$out"
+  printf '%s\n' 'echo fine' >"$wrapped/ok.sh"
+  out=$("$wrapped/rt-run" Test "$wrapped/ok.sh" 2>&1)
+  assert_eq "success: output only, no annotation" "fine" "$out"
+  printf '%s\n' 'false | true' >"$wrapped/pipe.sh"
+  if "$wrapped/rt-run" Test "$wrapped/pipe.sh" >/dev/null 2>&1; then rc=0; else rc=$?; fi
+  assert_eq "pipefail, as with GitHub's bash" "1" "$rc"
+fi
+
+echo
+echo "Rust MSRV job"
+if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
+  python3 - "$ROOT/.github/workflows/rust.yml" >"$(rt_tmpdir)/read-msrv.sh" <<'PY'
+import sys, yaml
+steps = yaml.safe_load(open(sys.argv[1]))["jobs"]["msrv"]["steps"]
+print(next(s["run"] for s in steps if s.get("id") == "msrv"), end="")
+PY
+  read_msrv() { # CARGO_TOML_CONTENT -> the version output
+    local d
+    d=$(mktemp -d "$(rt_tmpdir)/msrv.XXXXXX")
+    printf '%s\n' "$1" >"$d/Cargo.toml"
+    (cd "$d" && GITHUB_OUTPUT="$d/out" bash -eo pipefail "$(rt_tmpdir)/read-msrv.sh" >/dev/null && cat "$d/out")
+  }
+  assert_eq "rust-version from [package]" "version=1.88" \
+    "$(read_msrv $'[package]\nname = "x"\nedition = "2021"\nrust-version = "1.88"\n\n[dependencies]\nrand = "0.9"')"
+  assert_eq "rust-version from [workspace.package]" "version=1.80.1" \
+    "$(read_msrv $'[workspace]\nmembers = ["a"]\n\n[workspace.package]\nrust-version = "1.80.1" # MSRV')"
+  assert_eq "no rust-version -> empty, job does nothing" "version=" "$(read_msrv $'[package]\nname = "x"')"
+fi
+out=$(RT_CONF=() && rt_list_workflows "$(new_repo)" "$(printf 'rust\t.\n')")
+assert_contains "compare lists the MSRV job" "msrv: cargo check --workspace on Cargo.toml rust-version" "$out"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

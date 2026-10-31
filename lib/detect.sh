@@ -69,9 +69,12 @@ rt_detect_langs() {
   _emit() { [[ -z $2 ]] || printf '%s\t%s\n' "$1" "$(paste -sd, - <<<"$2")"; }
 
   # Python: needs project metadata, or requirements files plus actual .py code.
+  # Standalone scripts (.py files and no project anywhere) get one job at the
+  # root, which lints them; pytest and the build find nothing and pass.
   dirs=$(_rt_match "$files" '(^|/)(pyproject\.toml|setup\.py|setup\.cfg|Pipfile)$' | _rt_dirs)
   if grep -qE '\.py$' <<<"$files"; then
     dirs=$(printf '%s\n%s\n' "$dirs" "$(_rt_match "$files" '(^|/)requirements[^/]*\.txt$' | _rt_dirs)")
+    [[ -n ${dirs//[[:space:]]/} ]] || dirs=.
   fi
   _emit python "$(_rt_rootmost <<<"$dirs")"
 

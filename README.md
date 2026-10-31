@@ -49,18 +49,27 @@ lives in this repo's [reusable workflows](.github/workflows):
 |---|---|---|---|---|
 | Python | `python.yml` | ruff (+ `ruff format` if configured) | pytest | `uv build` |
 | Node / TypeScript | `node.yml` | `lint`, `typecheck`, `format:check` scripts, or `tsc --noEmit` | `test` script | `build` script |
-| Rust | `rust.yml` | `cargo fmt`, `clippy -D warnings` | `cargo test` (incl. doc tests), plus a `cargo audit` job | `cargo build` |
+| Rust | `rust.yml` | `cargo fmt`, `clippy -D warnings` | `cargo test` (incl. doc tests), plus `cargo audit` and MSRV jobs | `cargo build` |
 | Java / Kotlin (Gradle) | `jvm.yml` | `gradlew check -x test` | `gradlew test` | `gradlew assemble` |
 | Java / Kotlin (Maven) | `jvm.yml` | none by default | `mvn test` | `mvn verify -DskipTests` |
 | Terraform | `terraform.yml` | `terraform fmt`, tflint | `terraform test` | `init -backend=false` + `validate` per directory |
 | Ansible | `ansible.yml` | ansible-lint | none by default | none by default |
 | Shell | `shell.yml` | shellcheck | bats, if `*.bats` exist | none |
 
+A repo with `.py` files but no Python project (`pyproject.toml`, `setup.py`,
+requirements files, ...) still gets a Python job at the root, so helper scripts
+are linted; with nothing to test or build, those steps pass.
+
 Package managers and toolchain versions are picked up from the project (lockfiles,
 `.python-version`, `.nvmrc`, `.java-version`, `rust-toolchain.toml`, `.terraform-version`, ...).
 Every workflow can install Ubuntu packages first (`APT_PACKAGES`), for native
-libraries the build links against. Rust builds use `--locked` when `Cargo.lock`
-is committed, and save their cache only from the default branch.
+libraries the build links against. Each one can also run on other runners
+(`OS=ubuntu-latest,macos-latest`), run an extra command after the standard steps
+(`RUST_EXTRA=ci/smoke.sh`), and upload build output as an artifact
+(`RUST_ARTIFACTS=target/release/mytool`). Rust builds use `--locked` when `Cargo.lock`
+is committed, and save their cache only from the default branch. A crate that
+declares `rust-version` is also checked (`cargo check`) on that toolchain;
+`RUST_MSRV=skip` turns that off.
 
 Actions in these workflows are pinned to commit SHAs (with the version in a
 comment), since they run in every repo. Dependabot updates the SHAs and comments.
@@ -69,6 +78,12 @@ Callers pin `@main`, so **a change merged here applies to every repo on its next
 CI run**. To stage changes, set `RT_REF` (e.g. to a `v1` tag) when running
 `repo-ci`. This repo's own Dependabot config keeps the actions in these
 workflows current, and those bumps roll out the same way.
+
+When a lint, test, build or extra step fails, its output (from the first
+`error`/`warning` diagnostic, else the last 100 lines, colour codes and cargo
+progress lines removed) is repeated as an error annotation. The failure can
+then be read from the checks API, or by an agent fixing CI, without
+downloading the log.
 
 A final `CI OK` job passes only if every language job passed. It's the single
 check branch protection requires, so the ruleset doesn't need to know which
@@ -83,7 +98,10 @@ re-run `repo-ci` / `repo-dependabot`. See
 
 ```ini
 APT_PACKAGES=libudev-dev libusb-1.0-0-dev pkg-config
+OS=ubuntu-latest,macos-latest
 RUST_VERSION=1.96
+RUST_EXTRA=ci/smoke.sh
+RUST_ARTIFACTS=target/release/mytool
 DEPENDABOT_IGNORE_CARGO=rand:major+minor
 EXCLUDE=shell
 PYTHON_VERSION=3.12
@@ -99,8 +117,9 @@ a per-ecosystem comparison: what repo-tools would add, and what would be lost
 by replacing it (ignore rules, extra keys, ecosystems it didn't detect). Use
 `--force` to replace them. The comparison needs `yq` or python3 with PyYAML;
 without either it falls back to a plain diff. Existing workflows
-like `ci.yml` aren't touched, so remove them yourself if they duplicate the
-new one.
+like `ci.yml` aren't touched unless listed in `REPLACE_WORKFLOWS`
+(`REPLACE_WORKFLOWS=ci.yml`), in which case `repo-ci` removes them in the same PR.
+It warns about unlisted workflows that also run on push or pull requests.
 
 ## Branch protection
 

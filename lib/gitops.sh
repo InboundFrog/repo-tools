@@ -67,3 +67,29 @@ rt_publish_pr() {
     ok "opened PR: $url"
   fi
 }
+
+# rt_replace_workflows CLONE -> prints the repo-relative path of each workflow
+# named in REPLACE_WORKFLOWS that it deleted from CLONE, for rt_publish_pr.
+# Names are file names in .github/workflows ("ci.yml"); anything else, and
+# repo-tools' own files, are refused with a warning.
+rt_replace_workflows() {
+  local dir=$1 wf path
+  while IFS= read -r wf; do
+    [[ $wf == .github/workflows/* ]] && wf=${wf#.github/workflows/}
+    if [[ ! $wf =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$ ]]; then
+      warn "REPLACE_WORKFLOWS: '$wf' isn't a workflow file name in .github/workflows; ignoring it"
+      continue
+    fi
+    path=.github/workflows/$wf
+    if [[ $path == "$RT_CI_FILE" ]] || { [[ -f $dir/$path ]] && grep -qF "$RT_MARKER" "$dir/$path"; }; then
+      warn "REPLACE_WORKFLOWS: $path is managed by repo-tools; not removing it"
+    elif [[ -f $dir/$path ]]; then
+      rm -- "$dir/$path"
+      info "removing $path (REPLACE_WORKFLOWS)"
+      printf '%s\n' "$path"
+    else
+      info "REPLACE_WORKFLOWS: $path is already gone"
+    fi
+  done < <(rt_list "$(rt_conf REPLACE_WORKFLOWS)")
+  return 0
+}
