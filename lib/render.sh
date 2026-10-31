@@ -81,7 +81,7 @@ _rt_render_job() { # LANG DIRS
 
   cat <<EOF
   ${lang}:
-    uses: ${RT_SOURCE_REPO}/.github/workflows/${RT_WORKFLOW[$lang]}@${RT_REF}
+    uses: ${RT_SOURCE_REPO}/.github/workflows/${RT_WORKFLOW[$lang]}@${RT_REF}${RT_REF_COMMENT:+ # $RT_REF_COMMENT}
     strategy:
       fail-fast: false
       matrix:
@@ -130,9 +130,10 @@ _rt_check_no_expressions() { # PLAN
   [[ $1 != *'${{'* ]] || die "a directory name contains '\${{'; refusing to put it in the workflow"
 }
 
-# rt_render_ci DIR DEFAULT_BRANCH
+# rt_render_ci DIR DEFAULT_BRANCH  (RT_REF must be resolved first: rt_resolve_ref)
 rt_render_ci() {
   local dir=$1 branch=$2 plan lang dirs needs=()
+  [[ -n $RT_REF ]] || die "RT_REF isn't set (call rt_resolve_ref first)"
   plan=$(rt_ci_plan "$dir")
   _rt_check_no_expressions "$plan"
 

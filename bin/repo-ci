@@ -21,9 +21,9 @@ Usage: $(basename "$0") [options] REPO...
 Detects the languages in each repo and opens a PR adding $RT_CI_FILE.
 Workflows listed in REPLACE_WORKFLOWS in $RT_CONF_FILE are removed in the
 same PR.
-It calls the reusable workflows in $RT_SOURCE_REPO@$RT_REF, so later changes to
-those roll out without touching the repo again. A final "$RT_CI_CHECK_NAME" job
-gives branch protection one stable check to require.
+It calls the reusable workflows in $RT_SOURCE_REPO, pinned to the commit of its
+newest vX.Y.Z release; Dependabot then proposes each later release as a PR.
+A final "$RT_CI_CHECK_NAME" job gives branch protection one stable check to require.
 
 REPO is "owner/name", or "name" for repos you own.
 
@@ -34,7 +34,8 @@ Options:
 
 Environment:
   RT_SOURCE_REPO  Repo hosting the reusable workflows (default: $RT_SOURCE_REPO)
-  RT_REF          Ref the generated workflow pins to (default: $RT_REF)
+  RT_REF          Ref the generated workflow pins to instead (e.g. main, or a
+                  SHA). Default: the newest vX.Y.Z tag, as its commit SHA
 EOF
 }
 
@@ -78,4 +79,6 @@ EOF
 
 rt_parse_args "$@"
 rt_require gh git jq
+rt_resolve_ref || exit 1
+log "Reusable workflows: $RT_SOURCE_REPO@$RT_REF${RT_REF_COMMENT:+ ($RT_REF_COMMENT)}"
 rt_for_each_repo process "${RT_ARGS[@]+"${RT_ARGS[@]}"}"
