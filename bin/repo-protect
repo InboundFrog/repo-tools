@@ -122,7 +122,8 @@ process() {
     return 0
   fi
 
-  if gh api "repos/$RT_REPO/contents/$RT_CI_FILE?ref=$RT_DEFAULT_BRANCH" --silent 2>/dev/null; then
+  if gh api "repos/$RT_REPO/contents/$RT_CI_FILE?ref=$(jq -rn --arg b "$RT_DEFAULT_BRANCH" '$b | @uri')" \
+    --silent 2>/dev/null; then
     require_check=true
   else
     warn "$RT_CI_FILE isn't on $RT_DEFAULT_BRANCH yet, so '$RT_CI_CHECK_NAME' won't be required."

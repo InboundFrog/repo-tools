@@ -114,10 +114,26 @@ EOF
   return 0
 }
 
+# Config values and directory names are written into the workflow's `with:`
+# and matrix values, where GitHub evaluates ${{ }} expressions. A command like
+# "pytest -k ${{ github.head_ref }}" would then splice attacker-controlled text
+# (branch names, PR titles) into a command that the reusable workflow evals.
+# Refuse instead; commands can read the same data from the environment
+# (e.g. $GITHUB_HEAD_REF), which isn't re-parsed as code.
+_rt_check_no_expressions() { # PLAN
+  local key
+  for key in "${!RT_CONF[@]}"; do
+    [[ $key == DEPENDABOT_* || ${RT_CONF[$key]} != *'${{'* ]] ||
+      die "$RT_CONF_FILE: $key contains a \${{ }} expression; use environment variables (e.g. \$GITHUB_HEAD_REF) instead"
+  done
+  [[ $1 != *'${{'* ]] || die "a directory name contains '\${{'; refusing to put it in the workflow"
+}
+
 # rt_render_ci DIR DEFAULT_BRANCH
 rt_render_ci() {
   local dir=$1 branch=$2 plan lang dirs needs=()
   plan=$(rt_ci_plan "$dir")
+  _rt_check_no_expressions "$plan"
 
   cat <<EOF
 # ${RT_MARKER} (bin/repo-ci). Local edits will be overwritten.

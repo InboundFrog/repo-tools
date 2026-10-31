@@ -82,7 +82,8 @@ for repo in "${repos[@]}"; do
   for step in "${steps[@]}"; do
     step_flags=("${flags[@]+"${flags[@]}"}")
     [[ $step == protect ]] && step_flags+=("${protect_flags[@]+"${protect_flags[@]}"}")
-    if ! "$RT_ROOT/bin/repo-$step" "${step_flags[@]+"${step_flags[@]}"}" "$repo"; then
+    # "--" so a repo name from --file can't be taken as an option (e.g. "--force").
+    if ! "$RT_ROOT/bin/repo-$step" "${step_flags[@]+"${step_flags[@]}"}" -- "$repo"; then
       failed+=("$repo ($step)")
     fi
   done

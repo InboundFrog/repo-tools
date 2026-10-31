@@ -147,6 +147,25 @@ you'd rather switch.
 Private repos still get Dependabot, CI and delete-branch-on-merge, but CI isn't
 *enforced*. With GitHub Pro, pass `--include-private` to apply rulesets there too.
 
+## Security model
+
+- **Target repos are untrusted input.** Their files and `.github/repo-tools.conf`
+  are read as data: config values are never evaluated by the scripts, and
+  repo-tools refuses to read, write or delete through a symlink in a target
+  repo (`.github` itself included), even with `--force`.
+- **No `${{ }}` in config.** Values end up in the generated workflow, where
+  GitHub would evaluate expressions before the reusable workflow runs them as
+  commands. Use environment variables (`$GITHUB_HEAD_REF`, ...) in commands instead.
+- **Branches and PRs.** `repo-tools/*` branches are force-pushed whenever their
+  tree differs from what repo-tools would commit, so nothing else can ride along
+  in a repo-tools PR. PRs from forks are never mistaken for the repo-tools PR.
+- **`@main` is a trust decision.** Every caller runs whatever is on this repo's
+  `main` (or `RT_REF`) on its next CI run, so protect this repo's default
+  branch (`bin/repo-protect InboundFrog/repo-tools`) and review action bumps here.
+- **CI checks are not a security gate.** `pull_request` runs use the PR's own
+  copy of the workflow, so `CI OK` guards against mistakes, not against someone
+  with write access. Use `RT_APPROVALS` (and CODEOWNERS) for that.
+
 ## Development
 
 ```bash

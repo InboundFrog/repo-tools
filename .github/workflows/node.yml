@@ -243,10 +243,12 @@ jobs:
           dir=${dir%/}
           [[ $dir != . ]] || dir=''
           read -ra paths <<<"${PATHS//$'\n'/ }"
+          # Unique delimiter, so no path can end the multiline value early.
+          delim="RT_EOF_${RANDOM}${RANDOM}${RANDOM}"
           {
-            echo 'paths<<RT_EOF'
+            echo "paths<<$delim"
             for p in "${paths[@]}"; do printf '%s%s\n' "${dir:+$dir/}" "$p"; done
-            echo 'RT_EOF'
+            echo "$delim"
           } >>"$GITHUB_OUTPUT"
           os=$(tr '[:upper:]' '[:lower:]' <<<"$RUNNER_OS")
           name="${NAME:-build}-$os${dir:+-$dir}"
