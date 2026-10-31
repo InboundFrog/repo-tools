@@ -117,8 +117,9 @@ a per-ecosystem comparison: what repo-tools would add, and what would be lost
 by replacing it (ignore rules, extra keys, ecosystems it didn't detect). Use
 `--force` to replace them. The comparison needs `yq` or python3 with PyYAML;
 without either it falls back to a plain diff. Existing workflows
-like `ci.yml` aren't touched, so remove them yourself if they duplicate the
-new one.
+like `ci.yml` aren't touched unless listed in `REPLACE_WORKFLOWS`
+(`REPLACE_WORKFLOWS=ci.yml`), in which case `repo-ci` removes them in the same PR.
+It warns about unlisted workflows that also run on push or pull requests.
 
 ## Branch protection
 

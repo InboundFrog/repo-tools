@@ -142,6 +142,35 @@ _RT_JQ_WORKFLOW='
         end ) )
 '
 
+_rt_in_replace() { # WORKFLOW_FILE_NAME
+  local wf
+  while IFS= read -r wf; do [[ ${wf#.github/workflows/} == "$1" ]] && return 0; done < <(rt_list "$(rt_conf REPLACE_WORKFLOWS)")
+  return 1
+}
+
+# rt_overlapping_workflows CLONE -> file names of unmanaged workflows that run on
+# push or pull_request and aren't listed in REPLACE_WORKFLOWS: likely CI that
+# the generated workflow would duplicate.
+rt_overlapping_workflows() {
+  local dir=$1 wf json
+  while IFS= read -r wf; do
+    grep -qF "$RT_MARKER" "$dir/$wf" && continue
+    _rt_in_replace "${wf##*/}" && continue
+    if json=$(rt_yaml_to_json "$dir/$wf" 2>/dev/null); then
+      # push counts unless it's tags-only (a release workflow, not CI).
+      jq -e '(.on // .[true]) | (if type == "object" then . elif type == "array" then map({(.): null}) | add
+          else {(.): null} end) as $on
+        | ($on | has("pull_request"))
+          or (($on | has("push")) and ($on.push | type != "object" or has("branches") or has("branches-ignore")
+            or (has("tags") or has("tags-ignore") | not)))' <<<"$json" >/dev/null || continue
+    else
+      grep -qE '(^|[^a-z_])(push|pull_request)([^a-z_]|$)' "$dir/$wf" || continue
+    fi
+    printf '%s\n' "${wf##*/}"
+  done < <(cd "$dir" && git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml')
+  return 0
+}
+
 # rt_list_workflows CLONE PLAN
 # Lists existing workflows (jobs, actions and commands), then the jobs the
 # generated CI would run, so the two can be compared by eye.
@@ -153,6 +182,10 @@ rt_list_workflows() {
   for wf in "${files[@]+"${files[@]}"}"; do
     if grep -qF "$RT_MARKER" "$dir/$wf"; then
       echo "  ${wf##*/}  (managed by repo-tools; would be regenerated)"
+      continue
+    fi
+    if _rt_in_replace "${wf##*/}"; then
+      echo "  ${wf##*/}  (in REPLACE_WORKFLOWS; repo-ci would remove it)"
       continue
     fi
     if ! json=$(rt_yaml_to_json "$dir/$wf" 2>/dev/null); then

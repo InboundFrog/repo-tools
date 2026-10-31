@@ -393,6 +393,39 @@ assert_contains "bats reported when *.bats files exist" "      test: bats" "$out
 assert_not_contains "no skipped note with *.bats files" "skipped: no *.bats" "$out"
 
 echo
+echo "Replacing hand-written workflows (REPLACE_WORKFLOWS)"
+repo=$(new_repo)
+mk "$repo" Cargo.toml '[package]'
+mk "$repo" .github/workflows/ci.yml $'name: CI\non: [push, pull_request]\njobs: {}\n'
+mk "$repo" .github/workflows/tests.yaml $'on:\n  pull_request:\njobs: {}\n'
+mk "$repo" .github/workflows/release.yml $'on:\n  push:\n    tags: ["v*"]\njobs: {}\n'
+mk "$repo" .github/workflows/push.yml $'on:\n  push:\n    branches: [main]\n    tags: ["v*"]\njobs: {}\n'
+mk "$repo" .github/workflows/nightly.yml $'on:\n  schedule:\n    - cron: "0 3 * * *"\njobs: {}\n'
+mk "$repo" "$RT_CI_FILE" "# $RT_MARKER"
+mk "$repo" "$RT_CONF_FILE" "REPLACE_WORKFLOWS=ci.yml, .github/workflows/gone.yml, ../../etc/passwd, repo-tools-ci.yml"
+commit "$repo"
+rt_conf_load "$repo"
+if rt_yaml_to_json "$repo/.github/workflows/ci.yml" >/dev/null 2>&1; then
+  assert_eq "unlisted push/pull_request workflows flagged; tag-only, schedule-only and managed ones not" \
+    "$(printf '%s\n' push.yml tests.yaml)" "$(rt_overlapping_workflows "$repo" | sort)"
+  out=$(rt_list_workflows "$repo" "$(rt_ci_plan "$repo")")
+  assert_contains "compare marks listed workflows for removal" "ci.yml  (in REPLACE_WORKFLOWS; repo-ci would remove it)" "$out"
+fi
+removed=$(rt_replace_workflows "$repo" 2>"$(rt_tmpdir)/replace.err")
+err=$(cat "$(rt_tmpdir)/replace.err")
+assert_eq "only the listed, existing, unmanaged workflow is removed" ".github/workflows/ci.yml" "$removed"
+assert_eq "removed from the checkout" "no" "$([[ -e $repo/.github/workflows/ci.yml ]] && echo yes || echo no)"
+assert_contains "path outside .github/workflows refused" "'../../etc/passwd' isn't a workflow file name" "$err"
+assert_contains "repo-tools' own workflow kept" "$RT_CI_FILE is managed by repo-tools; not removing it" "$err"
+assert_contains "missing workflow is fine" ".github/workflows/gone.yml is already gone" "$err"
+assert_eq "managed CI untouched" "# $RT_MARKER" "$(cat "$repo/$RT_CI_FILE")"
+RT_DEFAULT_BRANCH=main RT_DRY_RUN=1
+out=$(rt_publish_pr "$repo" repo-tools/ci "t" "b" "$RT_CI_FILE" "$removed" 2>&1)
+assert_contains "the deletion goes into the PR" "-name: CI" "$out"
+assert_contains "dry run lists the deleted file" ".github/workflows/ci.yml" "$out"
+RT_DRY_RUN=0
+
+echo
 echo "Renderer and reusable workflows agree on inputs"
 if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
   for lang in "${RT_LANGS[@]}"; do
