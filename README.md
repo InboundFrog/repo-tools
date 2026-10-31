@@ -137,12 +137,32 @@ DEPENDABOT_EXCLUDE=docker
 Existing files without the header (e.g. a hand-written `dependabot.yml`) are
 left alone with a warning. For `dependabot.yml`, `repo-dependabot` also prints
 a per-ecosystem comparison: what repo-tools would add, and what would be lost
-by replacing it (ignore rules, extra keys, ecosystems it didn't detect). Use
-`--force` to replace them. The comparison needs `yq` or python3 with PyYAML;
-without either it falls back to a plain diff. Existing workflows
-like `ci.yml` aren't touched unless listed in `REPLACE_WORKFLOWS`
-(`REPLACE_WORKFLOWS=ci.yml`), in which case `repo-ci` removes them in the same PR.
-It warns about unlisted workflows that also run on push or pull requests.
+by replacing it (ignore rules, extra keys, ecosystems it didn't detect). The
+comparison needs `yq` or python3 with PyYAML; without either it falls back to a
+plain diff.
+
+`--force` replaces a hand-written `dependabot.yml` **without losing what it did**.
+Its ignore rules, interval and cooldown are written into `repo-tools.conf`, in
+the same PR, together with the comments that explained them. If the old file
+has anything the config can't express, such as labels, registries, `versions`
+ranges, extra directories or ecosystems repo-tools doesn't detect,
+`repo-dependabot` lists it and leaves the file alone. Add `--accept-loss` to
+replace it anyway; the PR description then lists what was dropped. Settings
+already in `repo-tools.conf` always win.
+
+Existing workflows like `ci.yml` aren't touched unless listed in
+`REPLACE_WORKFLOWS` (`REPLACE_WORKFLOWS=ci.yml`), in which case `repo-ci`
+removes them in the same PR. It warns about unlisted workflows that also run on
+push or pull requests. It also checks two things a replaced workflow may have
+been doing, and adds them to the terminal output and the PR description:
+
+- **Required checks.** If a ruleset or branch protection still requires a check
+  from a workflow the PR removes (e.g. `build & test`), the PR would wait for it
+  forever. Change that rule to require `CI OK` before merging.
+- **System packages.** Packages a hand-written workflow installs with
+  `apt-get install`, which no `APT_PACKAGES` / `<LANGUAGE>_APT_PACKAGES` setting
+  covers. Native crates like `hidapi` fail to build without them.
+  `repo-detect --compare` lists these too.
 
 ## Branch protection
 

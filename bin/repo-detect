@@ -104,4 +104,14 @@ if ((compare)); then
 
   printf '\n--- workflows: existing vs repo-tools ---\n'
   rt_list_workflows "$dir" "$plan"
+
+  suggestions=$(rt_apt_suggestions "$dir")
+  if [[ -n $suggestions ]]; then
+    printf '\n--- system packages ---\n'
+    while IFS=$'\t' read -r wf pkgs; do
+      echo "  $wf installs with apt: $pkgs"
+    done <<<"$suggestions"
+    echo "  The generated CI doesn't install these. If the build needs them, add to $RT_CONF_FILE:"
+    echo "    APT_PACKAGES=$(cut -f2 <<<"$suggestions" | tr ' ' '\n' | LC_ALL=C sort -u | paste -sd' ' -)"
+  fi
 fi

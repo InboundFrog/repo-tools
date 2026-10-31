@@ -25,6 +25,7 @@ RT_CI_CHECK_NAME="CI OK"
 
 RT_DRY_RUN="${RT_DRY_RUN:-0}"
 RT_FORCE="${RT_FORCE:-0}"
+RT_ACCEPT_LOSS="${RT_ACCEPT_LOSS:-0}" # --force may drop settings it can't carry over
 
 # --- Logging -----------------------------------------------------------------
 
@@ -92,6 +93,7 @@ rt_parse_args() {
     case $1 in
       -n | --dry-run) RT_DRY_RUN=1 ;;
       -f | --force) RT_FORCE=1 ;;
+      --accept-loss) RT_ACCEPT_LOSS=1 ;;
       -h | --help)
         usage
         exit 0
@@ -260,6 +262,50 @@ rt_conf_load() {
 
 # rt_conf KEY [DEFAULT]
 rt_conf() { printf '%s\n' "${RT_CONF[$1]:-${2:-}}"; }
+
+# rt_conf_append CLONE SOURCE COMMENTS  (KEY<TAB>VALUE lines on stdin)
+# Appends settings carried over from SOURCE (a file being replaced) to the
+# repo's repo-tools.conf, under a comment naming it and followed by COMMENTS
+# (one per line, the reasons the old file gave). Keys the conf already sets
+# are kept as they are. Prints each KEY=VALUE written; reload with
+# rt_conf_load afterwards.
+rt_conf_append() {
+  local dir=$1 source=$2 comments=$3 file="$1/$RT_CONF_FILE" key val c
+  local -a lines=()
+  while IFS=$'\t' read -r key val; do
+    [[ $key =~ ^[A-Z][A-Z0-9_]*$ && -n $val && $val != *[[:cntrl:]]* ]] || continue
+    if [[ -n ${RT_CONF[$key]+set} ]]; then
+      [[ ${RT_CONF[$key]} == "$val" ]] ||
+        warn "$RT_CONF_FILE already sets $key=${RT_CONF[$key]}; keeping it (the old $source had $val)"
+      continue
+    fi
+    lines+=("$key=$val")
+  done
+  ((${#lines[@]})) || return 0
+  rt_path_inside "$dir" "$RT_CONF_FILE" || die "$RT_CONF_FILE (or a directory above it) is a symlink; refusing to write it"
+  mkdir -p "$(dirname "$file")"
+  local start=newline
+  if [[ ! -s $file ]]; then
+    start=header
+  elif [[ -n $(tail -c1 "$file") ]]; then
+    start=unterminated # the file doesn't end with a newline
+  fi
+  {
+    case $start in
+      header)
+        printf '# Settings for the generated CI and dependabot.yml. Every key:\n'
+        printf '# https://github.com/%s/blob/main/examples/repo-tools.conf\n' "$RT_SOURCE_REPO"
+        ;;
+      unterminated) echo ;;
+    esac
+    printf '\n# Carried over from the hand-written %s when repo-tools replaced it.\n' "$source"
+    while IFS= read -r c; do
+      [[ -z $c || $c == *[[:cntrl:]]* ]] || printf '# %s\n' "$c"
+    done <<<"$comments"
+    printf '%s\n' "${lines[@]}"
+  } >>"$file"
+  printf '%s\n' "${lines[@]}"
+}
 
 # "name<TAB>dir,dir" lines (a CI plan or ecosystem list) -> a Markdown list for
 # PR bodies. Directory names come from the target repo, so each is put in a

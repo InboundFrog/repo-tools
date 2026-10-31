@@ -27,6 +27,9 @@ Options:
       --include-private  passed to repo-protect (needs GitHub Pro)
   -n, --dry-run       Show what would change without changing anything
   -f, --force         Replace existing unmanaged dependabot.yml / CI files
+                      (dependabot.yml settings are carried over into
+                      repo-tools.conf; stops if any would be lost)
+      --accept-loss   With --force: replace even if some settings are lost
   -h, --help          Show this help
 EOF
 }
@@ -49,6 +52,7 @@ while (($#)); do
     --include-private) protect_flags+=(--include-private) ;;
     -n | --dry-run) flags+=(--dry-run) ;;
     -f | --force) flags+=(--force) ;;
+    --accept-loss) flags+=(--accept-loss) ;;
     -h | --help)
       usage
       exit 0
