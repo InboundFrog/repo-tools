@@ -9,9 +9,12 @@ fi
 
 # --- Settings (override via environment) -------------------------------------
 
-# Repo hosting the reusable workflows, and the ref callers pin to.
+# Repo hosting the reusable workflows, and the ref callers pin to. Empty RT_REF
+# means the newest vX.Y.Z release tag, pinned by commit SHA (rt_resolve_ref),
+# so callers only move when Dependabot proposes the next release.
 RT_SOURCE_REPO="${RT_SOURCE_REPO:-InboundFrog/repo-tools}"
-RT_REF="${RT_REF:-main}"
+RT_REF="${RT_REF:-}"
+RT_REF_COMMENT='' # the tag behind a SHA-pinned RT_REF, as "# vX.Y.Z" for Dependabot
 
 # Files carrying this marker are owned by repo-tools and may be overwritten.
 RT_MARKER="Managed by repo-tools"
@@ -43,8 +46,34 @@ die() {
 # Both end up verbatim in the generated workflow's `uses:` line.
 [[ $RT_SOURCE_REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
   die "RT_SOURCE_REPO must look like owner/name (got: $RT_SOURCE_REPO)"
-[[ $RT_REF =~ ^[A-Za-z0-9_.][A-Za-z0-9_./-]*$ && $RT_REF != *..* ]] ||
+[[ -z $RT_REF || ($RT_REF =~ ^[A-Za-z0-9_.][A-Za-z0-9_./-]*$ && $RT_REF != *..*) ]] ||
   die "RT_REF must be a branch, tag or commit SHA (got: $RT_REF)"
+
+_rt_ls_tags() { git ls-remote --tags "https://github.com/$RT_SOURCE_REPO" 'v*'; }
+
+# rt_resolve_ref: if RT_REF is unset, sets it to the commit SHA of the newest
+# vX.Y.Z tag in RT_SOURCE_REPO, and RT_REF_COMMENT to that tag. Returns 1
+# (with a warning) if that can't be done. Call once, in the top-level shell,
+# before rendering a CI workflow.
+rt_resolve_ref() {
+  local refs tag sha
+  [[ -z $RT_REF ]] || return 0
+  if ! refs=$(_rt_ls_tags); then
+    warn "could not list release tags of $RT_SOURCE_REPO (set RT_REF to pin a ref yourself)"
+    return 1
+  fi
+  tag=$(sed -nE 's#^[0-9a-f]{40}[[:space:]]+refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$#\1#p' <<<"$refs" |
+    sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)
+  if [[ -z $tag ]]; then
+    warn "$RT_SOURCE_REPO has no vX.Y.Z release tag yet; tag one, or set RT_REF (e.g. RT_REF=main)"
+    return 1
+  fi
+  tag=v$tag
+  # An annotated tag's own object is listed too; the commit is the peeled "^{}" entry.
+  sha=$(awk -v t="refs/tags/$tag^{}" '$2 == t { print $1 }' <<<"$refs")
+  [[ -n $sha ]] || sha=$(awk -v t="refs/tags/$tag" '$2 == t { print $1 }' <<<"$refs")
+  RT_REF=$sha RT_REF_COMMENT=$tag
+}
 
 rt_require() {
   local c

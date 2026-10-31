@@ -81,6 +81,11 @@ if ((render)); then
   printf '\n--- %s ---\n' "$RT_DEPENDABOT_FILE"
   rt_render_dependabot "$dir"
   printf '\n--- %s ---\n' "$RT_CI_FILE"
+  # A preview: without network access, show @main rather than fail.
+  rt_resolve_ref || {
+    warn "previewing with @main; repo-ci pins the newest release instead"
+    RT_REF=main
+  }
   rt_render_ci "$dir" "$branch"
 fi
 

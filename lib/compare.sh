@@ -142,6 +142,22 @@ _RT_JQ_WORKFLOW='
         end ) )
 '
 
+# rt_workflow_lacks_permissions FILE
+# Succeeds if a workflow leaves at least one job on the repo's default token
+# permissions: no top-level `permissions:` and a job without its own. Such a
+# job gets read-only access once repo-protect makes that the default.
+rt_workflow_lacks_permissions() {
+  local json
+  if json=$(rt_yaml_to_json "$1" 2>/dev/null); then
+    jq -e 'type == "object" and (has("permissions") | not)
+      and ((.jobs // {}) | to_entries | any(.value | type != "object" or (has("permissions") | not)))' \
+      <<<"$json" >/dev/null
+  else
+    # No YAML parser: only a top-level block is recognised.
+    ! grep -qE '^permissions:' "$1"
+  fi
+}
+
 _rt_in_replace() { # WORKFLOW_FILE_NAME
   local wf
   while IFS= read -r wf; do [[ ${wf#.github/workflows/} == "$1" ]] && return 0; done < <(rt_list "$(rt_conf REPLACE_WORKFLOWS)")

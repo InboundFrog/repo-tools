@@ -5,6 +5,8 @@ set -euo pipefail
 RT_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 # shellcheck source=lib/common.sh
 source "$RT_ROOT/lib/common.sh"
+# shellcheck source=lib/compare.sh
+source "$RT_ROOT/lib/compare.sh"
 
 RT_RULESET_NAME="repo-tools: default branch"
 RT_APPROVALS="${RT_APPROVALS:-0}"
@@ -20,6 +22,9 @@ Usage: $(basename "$0") [options] REPO...
 
 All repos:
   - delete head branches after merge
+  - GitHub Actions: workflows get a read-only GITHUB_TOKEN unless they declare
+    more in \`permissions:\`, and can't create or approve pull requests
+    (workflows that don't declare \`permissions:\` are listed first)
 Public repos (or private with --include-private, which needs a paid plan):
   - secret scanning + push protection, private vulnerability reporting and
     CodeQL code scanning "default setup" (public only; a repo already running
@@ -92,6 +97,42 @@ enable_codeql() {
   fi
 }
 
+# Lists default-branch workflows that rely on the repo's default token
+# permissions, which restrict_actions_token is about to make read-only.
+warn_workflows_without_permissions() {
+  local ref name file
+  file="$(rt_tmpdir)/workflow.yml"
+  ref=$(jq -rn --arg b "$RT_DEFAULT_BRANCH" '$b | @uri')
+  while IFS= read -r name; do
+    gh api -H "Accept: application/vnd.github.raw+json" \
+      "repos/$RT_REPO/contents/.github/workflows/$(jq -rn --arg n "$name" '$n | @uri')?ref=$ref" \
+      >"$file" 2>/dev/null || continue
+    if rt_workflow_lacks_permissions "$file"; then
+      warn "$name doesn't declare \`permissions:\` for every job, so it gets the default token: read-only from now on."
+      warn "  If it needs to write (push, releases, PR comments...), declare it there, e.g. \`permissions: { contents: write }\`."
+    fi
+  done < <(gh api "repos/$RT_REPO/contents/.github/workflows?ref=$ref" \
+    --jq '.[] | select(.type == "file" and (.name | test("\\.ya?ml$"))) | .name' 2>/dev/null || true)
+}
+
+# Default GITHUB_TOKEN to read-only, and stop workflows creating/approving
+# PRs (an approval from the token could satisfy a required review).
+restrict_actions_token() {
+  local current want='{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": false}'
+  current=$(gh api "repos/$RT_REPO/actions/permissions/workflow" 2>/dev/null) || current='null'
+  if jq -e '.default_workflow_permissions == "read" and .can_approve_pull_request_reviews == false' \
+    <<<"$current" >/dev/null 2>&1; then
+    ok "Actions token already read-only by default; workflows can't approve PRs"
+    return 0
+  fi
+  warn_workflows_without_permissions
+  if rt_api PUT "repos/$RT_REPO/actions/permissions/workflow" "$want"; then
+    rt_done "Actions token read-only by default; workflows can't create or approve PRs"
+  else
+    warn "could not change the Actions token defaults (an organization policy may control them)"
+  fi
+}
+
 process() {
   local id require_check=false
   log "Protect: $1"
@@ -99,7 +140,15 @@ process() {
   rt_check_repo_usable
 
   rt_api PATCH "repos/$RT_REPO" '{"delete_branch_on_merge": true}'
-  rt_done "delete branch on merge enabled"
+  # Read it back: the setting is easy to miss in the UI, and only affects PRs
+  # merged after it is on (and never a branch another open PR still uses).
+  if ((!RT_DRY_RUN)) && [[ $(gh api "repos/$RT_REPO" --jq .delete_branch_on_merge) != true ]]; then
+    warn "delete branch on merge did not stick (GitHub still reports it off); check Settings > General"
+  else
+    rt_done "delete branch on merge enabled"
+  fi
+
+  restrict_actions_token
 
   if rt_is_public; then
     if rt_api PATCH "repos/$RT_REPO" '{"security_and_analysis": {

@@ -60,6 +60,33 @@ validate_yaml() { # NAME FILE
   fi
 }
 
+echo "Pinning callers to the newest release (RT_REF unset)"
+sha_a=$(printf 'a%.0s' {1..40}) sha_b=$(printf 'b%.0s' {1..40}) sha_c=$(printf 'c%.0s' {1..40})
+sha_d=$(printf 'd%.0s' {1..40}) sha_e=$(printf 'e%.0s' {1..40})
+# v1.10.0 must beat v1.9.0 (numeric, not text, order); v1.10.0 is annotated,
+# so its commit is the peeled ^{} entry; v2.0.0-rc1 and v9 aren't releases.
+_rt_ls_tags() {
+  printf '%s\trefs/tags/%s\n' "$sha_a" v1.9.0 "$sha_b" v1.10.0 "$sha_c" 'v1.10.0^{}' \
+    "$sha_d" v2.0.0-rc1 "$sha_e" v9
+}
+RT_REF='' RT_REF_COMMENT=''
+rt_resolve_ref
+assert_eq "newest vX.Y.Z tag, as the commit it points to" "$sha_c v1.10.0" "$RT_REF $RT_REF_COMMENT"
+_rt_ls_tags() { printf '%s\trefs/tags/%s\n' "$sha_a" v1.0.0; }
+RT_REF='' RT_REF_COMMENT=''
+rt_resolve_ref
+assert_eq "lightweight tag resolves to itself" "$sha_a v1.0.0" "$RT_REF $RT_REF_COMMENT"
+_rt_ls_tags() { printf '%s\trefs/tags/%s\n' "$sha_a" nightly; }
+RT_REF='' RT_REF_COMMENT=''
+if rt_resolve_ref 2>/dev/null; then rc=0; else rc=$?; fi
+assert_eq "no release tag -> error, nothing pinned" "1 ''" "$rc '$RT_REF'"
+RT_REF=main RT_REF_COMMENT=''
+rt_resolve_ref
+assert_eq "an explicit RT_REF is kept as-is" "main" "$RT_REF"
+unset -f _rt_ls_tags
+RT_REF=$sha_c RT_REF_COMMENT=v1.10.0 # used by the rendering tests below
+
+echo
 echo "Polyglot repo detection"
 repo=$(new_repo)
 mk "$repo" package.json '{}'
@@ -96,7 +123,8 @@ assert_eq "shell scripts found by extension and shebang" \
 rt_conf_load "$repo"
 ci=$(rt_render_ci "$repo" main)
 dep=$(rt_render_dependabot "$repo")
-assert_contains "CI calls reusable workflow at RT_REF" "uses: $RT_SOURCE_REPO/.github/workflows/python.yml@$RT_REF" "$ci"
+assert_contains "CI calls reusable workflow pinned to the release SHA, tag in a comment" \
+  "uses: $RT_SOURCE_REPO/.github/workflows/python.yml@$RT_REF # $RT_REF_COMMENT" "$ci"
 assert_contains "CI matrix over python dirs" "dir: ['scripts', 'tools/py']" "$ci"
 assert_contains "gradle job passes build-tool" "build-tool: gradle" "$ci"
 assert_contains "aggregate job needs every language" \
@@ -510,6 +538,25 @@ assert_eq "owner/name accepted" "octo/my.repo-1" "$(rt_resolve_repo octo/my.repo
 
 assert_eq "PR body puts directory names in code spans" \
   "- \`npm\`: \`.\`, \`@org/pkg\`, \`we'ird\`" "$(printf 'npm\t.,@org/pkg,we`ird\n' | rt_md_plan)"
+
+echo
+echo "Workflows relying on the default token permissions (repo-protect)"
+wf="$(rt_tmpdir)/perm.yml"
+lacks() { # YAML -> "lacks" or "declares"
+  printf '%s\n' "$1" >"$wf"
+  if rt_workflow_lacks_permissions "$wf"; then echo lacks; else echo declares; fi
+}
+assert_eq "no permissions anywhere" lacks \
+  "$(lacks $'on: push\njobs:\n  a:\n    runs-on: x\n    steps: [{run: "true"}]')"
+assert_eq "top-level permissions" declares \
+  "$(lacks $'on: push\npermissions:\n  contents: read\njobs:\n  a:\n    runs-on: x')"
+assert_eq "every job declares its own" declares \
+  "$(lacks $'on: push\njobs:\n  a:\n    permissions: {}\n  b:\n    permissions:\n      contents: write')"
+assert_eq "one job without" lacks \
+  "$(lacks $'on: push\njobs:\n  a:\n    permissions: {}\n  b:\n    runs-on: x')"
+assert_eq "this repo's own CI declares permissions" declares "$(lacks "$(cat "$ROOT/.github/workflows/repo-tools-ci.yml")")"
+rt_render_ci "$(new_repo)" main >"$wf"
+assert_eq "generated CI declares permissions" declares "$(if rt_workflow_lacks_permissions "$wf"; then echo lacks; else echo declares; fi)"
 
 echo
 echo "Listing existing workflows next to the generated jobs"

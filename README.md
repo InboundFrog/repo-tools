@@ -9,7 +9,7 @@ which is how updates get rolled out to repos you've already configured.
 |---|---|
 | `bin/repo-dependabot` | Enables Dependabot alerts and security updates; opens a PR adding a generated `.github/dependabot.yml` |
 | `bin/repo-ci` | Opens a PR adding `.github/workflows/repo-tools-ci.yml`, which runs lint, test and build for each detected language |
-| `bin/repo-protect` | Turns on delete-branch-on-merge; on public repos, also secret scanning, push protection, private vulnerability reporting, CodeQL default setup and a default-branch ruleset |
+| `bin/repo-protect` | Turns on delete-branch-on-merge, makes the Actions token read-only by default and stops Actions approving PRs; on public repos, also secret scanning, push protection, private vulnerability reporting, CodeQL default setup and a default-branch ruleset |
 | `bin/repo-apply` | Runs all three across one repo, a list, or `--all` of your repos |
 | `bin/repo-detect` | Shows what would be detected and generated, from a local checkout or a repo. With `--compare`, sets it against the repo's existing `dependabot.yml` and workflows. Changes nothing |
 
@@ -79,10 +79,28 @@ top-level `env:` (`RT_*_VERSION`). Dependabot can't see those, so bump them by h
 A project's own tool versions still win: ruff or pytest from its dependencies,
 Terraform from `.terraform-version`.
 
-Callers pin `@main`, so **a change merged here applies to every repo on its next
-CI run**. To stage changes, set `RT_REF` (e.g. to a `v1` tag) when running
-`repo-ci`. This repo's own Dependabot config keeps the actions in these
-workflows current, and those bumps roll out the same way.
+Callers are **pinned to a release**: `repo-ci` writes
+`uses: InboundFrog/repo-tools/.github/workflows/<lang>.yml@<commit SHA> # vX.Y.Z`,
+using the newest `vX.Y.Z` tag here. A change merged to `main` reaches no one
+until it's released. Each caller's Dependabot then opens a PR to move to the
+new release, after its cooldown (`DEPENDABOT_COOLDOWN_DAYS`, 3 by default).
+So one bad release shows up as a failing Dependabot PR in each repo rather
+than as broken CI everywhere. To follow `main` anyway, or to pin a SHA
+yourself, set `RT_REF` when running `repo-ci`.
+
+### Releasing
+
+```bash
+git checkout main && git pull
+git tag -a v1.2.0 -m "v1.2.0"   # semver: major for breaking changes to inputs or config
+git push origin v1.2.0
+```
+
+Tags are only an index: callers pin the SHA, so a tag moved later doesn't change
+what they run. Without any `vX.Y.Z` tag, `repo-ci` stops and asks for one (or for `RT_REF`).
+
+This repo's own Dependabot config keeps the actions in these workflows current;
+those bumps ship in the next release.
 
 When a lint, test, build or extra step fails, its output (from the first
 `error`/`warning` diagnostic, else the last 100 lines, colour codes and cargo
@@ -148,6 +166,17 @@ the queries current. A repo that already runs its own CodeQL workflow (advanced
 setup) keeps it; `repo-protect` warns and moves on. Delete that workflow first if
 you'd rather switch.
 
+On every repo, `repo-protect` also restricts GitHub Actions:
+
+- **The `GITHUB_TOKEN` is read-only by default.** A workflow that needs more
+  says so in its own `permissions:` block, so whoever writes it takes on the
+  extra access deliberately. Before the default changes, `repo-protect` lists
+  the workflows on the default branch that don't declare `permissions:` for
+  every job; any that write (push tags, publish releases, comment) need a block
+  adding.
+- **Workflows can't create or approve pull requests**, so a token approval
+  can't satisfy a required review.
+
 **Free plan limits:** rulesets, secret scanning and CodeQL only work on public repos.
 Private repos still get Dependabot, CI and delete-branch-on-merge, but CI isn't
 *enforced*. With GitHub Pro, pass `--include-private` to apply rulesets there too.
@@ -164,9 +193,12 @@ Private repos still get Dependabot, CI and delete-branch-on-merge, but CI isn't
 - **Branches and PRs.** `repo-tools/*` branches are force-pushed whenever their
   tree differs from what repo-tools would commit, so nothing else can ride along
   in a repo-tools PR. PRs from forks are never mistaken for the repo-tools PR.
-- **`@main` is a trust decision.** Every caller runs whatever is on this repo's
-  `main` (or `RT_REF`) on its next CI run, so protect this repo's default
-  branch (`bin/repo-protect InboundFrog/repo-tools`) and review action bumps here.
+- **Releases are the trust boundary.** Callers run a pinned commit and move
+  only through a Dependabot PR, so a bad merge here stays here until it's
+  tagged. Keep this repo's default branch protected
+  (`bin/repo-protect InboundFrog/repo-tools`), and look at what changed since
+  the last tag before releasing. `RT_REF=main` gives up that boundary for the
+  repos it's used on.
 - **CI checks are not a security gate.** `pull_request` runs use the PR's own
   copy of the workflow, so `CI OK` guards against mistakes, not against someone
   with write access. Use `RT_APPROVALS` (and CODEOWNERS) for that.
