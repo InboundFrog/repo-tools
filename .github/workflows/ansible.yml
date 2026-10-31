@@ -38,9 +38,9 @@ on:
         type: string
         default: "3.13"
       ansible-lint-version:
-        description: Pin ansible-lint (e.g. 25.9.0). Empty installs the latest.
+        description: ansible-lint version. Pinned by default; empty installs the latest.
         type: string
-        default: ""
+        default: 26.10.1
       lint-command:
         type: string
         default: ""

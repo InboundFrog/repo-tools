@@ -73,6 +73,11 @@ declares `rust-version` is also checked (`cargo check`) on that toolchain;
 
 Actions in these workflows are pinned to commit SHAs (with the version in a
 comment), since they run in every repo. Dependabot updates the SHAs and comments.
+Tools the workflows install themselves (uv, ruff, poetry, pytest, corepack,
+cargo-audit, ansible-lint, Terraform, tflint) are pinned too, in each workflow's
+top-level `env:` (`RT_*_VERSION`). Dependabot can't see those, so bump them by hand.
+A project's own tool versions still win: ruff or pytest from its dependencies,
+Terraform from `.terraform-version`.
 
 Callers pin `@main`, so **a change merged here applies to every repo on its next
 CI run**. To stage changes, set `RT_REF` (e.g. to a `v1` tag) when running

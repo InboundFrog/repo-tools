@@ -560,6 +560,24 @@ assert_contains "dry run lists the deleted file" ".github/workflows/ci.yml" "$ou
 RT_DRY_RUN=0
 
 echo
+echo "Tools installed by the reusable workflows are pinned"
+wfs=("$ROOT"/.github/workflows/{python,node,rust,jvm,terraform,ansible,shell}.yml)
+# Each pattern is an install of the latest release of something.
+for unpinned in 'uvx ruff ' 'uvx poetry ' 'install pytest$' 'install -g corepack$' 'tool: cargo-audit$' 'v=latest'; do
+  hits=$(grep -nE -- "$unpinned" "${wfs[@]}" || true)
+  assert_eq "no unpinned install: $unpinned" "" "$hits"
+done
+all_wfs=$(cat "${wfs[@]}")
+for var in RT_UV_VERSION RT_RUFF_VERSION RT_POETRY_VERSION RT_PYTEST_VERSION RT_COREPACK_VERSION \
+  RT_CARGO_AUDIT_VERSION RT_TERRAFORM_VERSION RT_TFLINT_VERSION; do
+  # Defined once (top-level env, a version) and used at least once.
+  defs=$(grep -cE -- "^  $var: v?[0-9]" <<<"$all_wfs" || true)
+  uses=$(grep -c -- "$var[^:]" <<<"$all_wfs" || true)
+  assert_eq "$var defined once and used" "1 yes" "$defs $([[ $uses -ge 1 ]] && echo yes || echo no)"
+done
+assert_contains "ansible-lint pinned by default" "default: 26." "$(sed -n '/ansible-lint-version:/,/default:/p' "$ROOT/.github/workflows/ansible.yml")"
+
+echo
 echo "Renderer and reusable workflows agree on inputs"
 if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
   for lang in "${RT_LANGS[@]}"; do
