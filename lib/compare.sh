@@ -257,3 +257,236 @@ rt_list_workflows() {
   done <<<"$plan"
   echo "    job ci-ok \"$RT_CI_CHECK_NAME\"  (the check branch protection requires)"
 }
+
+# --- Carrying a hand-written dependabot.yml over (repo-dependabot --force) ------
+
+# Splits an existing dependabot.yml (as JSON) into what repo-tools.conf can
+# express and what it can't. $gen is the generated file (as JSON), for the
+# ecosystems and directories repo-tools covers. Output:
+#   keys:  [{key, value}]  repo-tools.conf settings that keep its behaviour
+#   lost:  [text]          settings that would be dropped
+#   notes: [text]          behaviour repo-tools changes on purpose
+# shellcheck disable=SC2016 # jq program
+_RT_JQ_MIGRATE='
+  def norm_dir: if . == "/" then "/" else "/" + (ltrimstr("/") | rtrimstr("/")) end;
+  def dirs: ((.directories // [.directory]) | map(select(. != null) | norm_dir));
+  def known: ["package-ecosystem", "directory", "directories", "schedule", "cooldown", "ignore", "groups"];
+  def intervals: ["daily", "weekly", "monthly", "quarterly", "semiannually", "yearly"];
+  def conf_key: "DEPENDABOT_IGNORE_" + (ascii_upcase | gsub("-"; "_"));
+  def semver: test("^version-update:semver-(major|minor|patch)$");
+  def ignore_ok: type == "object" and ((keys - ["dependency-name", "update-types"]) | length) == 0
+    and (.["dependency-name"] | type == "string" and test("^[^\\s,]+$"))
+    and ((.["update-types"] // []) | all(.[]; type == "string" and semver));
+  def ignore_entry: .["dependency-name"] + (
+    (.["update-types"] // []) | map(sub("^version-update:semver-"; "")) | unique
+    | (["major", "minor", "patch"] - (["major", "minor", "patch"] - .)) as $t
+    | if ($t | length) > 0 then ":" + ($t | join("+")) else "" end);
+  (if type == "object" then . else {} end) as $e
+  | (($gen.updates // []) | map({key: .["package-ecosystem"], value: dirs}) | from_entries) as $gdirs
+  | ($e.updates // [] | map(select(type == "object"))) as $u
+  | ($u | map(.schedule.interval // empty) | unique) as $ints
+  | ($u | map(.cooldown["default-days"] // empty) | unique) as $cools
+  | ($u | group_by(.["package-ecosystem"])) as $by_eco
+  | {
+      keys: (
+        [ $by_eco[] | .[0]["package-ecosystem"] as $eco
+          | [ .[] | (.ignore // [])[] | select(ignore_ok) | ignore_entry ] | unique
+          | select(length > 0) | { key: ($eco | conf_key), value: join(", ") } ]
+        + (if ($ints | length) == 1 and $ints[0] != "weekly" and ($ints[0] | IN(intervals[]))
+            then [{ key: "DEPENDABOT_INTERVAL", value: $ints[0] }] else [] end)
+        + (if ($cools | length) == 1 and ($cools[0] | type) == "number" and $cools[0] != 3
+            then [{ key: "DEPENDABOT_COOLDOWN_DAYS", value: ($cools[0] | tostring) }] else [] end)
+      ),
+      lost: (
+        [ ($e | keys - ["version", "updates"])[] | "top-level `\(.)`" ]
+        + [ $by_eco[] | .[0]["package-ecosystem"] as $eco
+            | if $gdirs[$eco] == null then
+                "`\($eco)`: repo-tools does not detect it here, so it would no longer be updated"
+              else
+                ( (map(dirs[]) | unique) - $gdirs[$eco] | select(length > 0)
+                  | "`\($eco)`: directories \(map("`\(.)`") | join(", ")) would no longer be updated" ),
+                ( select(length > 1) | "`\($eco)`: \(length) separate update entries (e.g. per target branch) would become one" ),
+                ( map(keys - known) | add | unique[] | "`\($eco)`: `\(.)`" ),
+                ( map((.schedule // {}) | keys - ["interval"]) | add | unique[] | "`\($eco)`: `schedule.\(.)`" ),
+                ( map((.cooldown // {}) | keys - ["default-days"]) | add | unique[] | "`\($eco)`: `cooldown.\(.)`" ),
+                ( .[] | (.ignore // [])[] | select(ignore_ok | not)
+                  | "`\($eco)`: ignore rule for `\(.["dependency-name"] // "?")` (\(keys - ["dependency-name"] | join(", ")))" )
+              end ]
+        + (if ($ints | length) > 1 then ["ecosystems update on different schedules (\($ints | join(", "))); repo-tools.conf sets one `DEPENDABOT_INTERVAL`"]
+           elif ($ints | length) == 1 and ($ints[0] | IN(intervals[]) | not) then ["schedule interval `\($ints[0])`"]
+           else [] end)
+        + (if ($cools | length) > 1 then ["ecosystems use different cooldowns (\($cools | map(tostring) | join(", ")) days); repo-tools.conf sets one `DEPENDABOT_COOLDOWN_DAYS`"] else [] end)
+      ),
+      notes: (
+        [ $by_eco[] | .[0]["package-ecosystem"] as $eco | (map((.groups // {}) | keys) | add | unique) as $g
+          | select($g | length > 0)
+          | "`\($eco)`: its groups (\($g | map("`\(.)`") | join(", "))) are replaced by repo-tools grouping" ]
+        + (if ($cools | length) == 0 then ["new releases now wait 3 days before being proposed (`DEPENDABOT_COOLDOWN_DAYS=0` turns that off)"] else [] end)
+      )
+    }
+'
+
+# rt_migrate_dependabot EXISTING GENERATED -> the JSON plan above (compact).
+# Returns 2 when no YAML parser is available to read them.
+rt_migrate_dependabot() {
+  local existing generated
+  existing=$(rt_yaml_to_json "$1" 2>/dev/null) && generated=$(rt_yaml_to_json "$2" 2>/dev/null) || return 2
+  [[ -n $existing && $existing != null ]] || existing='{}'
+  jq -c --argjson gen "$generated" "$_RT_JQ_MIGRATE" <<<"$existing"
+}
+
+# rt_dependabot_comments FILE -> the comments inside its update entries
+# (indented ones), which usually explain an ignore rule. The unindented
+# header comments are boilerplate and are skipped.
+rt_dependabot_comments() {
+  local line
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ ^[[:space:]]+#[[:space:]]?(.*)$ ]] && printf '%s\n' "${BASH_REMATCH[1]}"
+  done <"$1"
+  return 0
+}
+
+# --- Checks that would disappear (repo-ci REPLACE_WORKFLOWS) -------------------------
+
+# rt_workflow_check_names FILE -> the name each job reports its check under
+# (its `name:`, else its key). Matrix jobs add " (values)", and jobs calling
+# a reusable workflow add " / <inner job>"; rt_match_required allows for both.
+rt_workflow_check_names() {
+  local json
+  json=$(rt_yaml_to_json "$1" 2>/dev/null) || return 2
+  jq -r '(if type == "object" then .jobs else null end) // {} | to_entries[]
+    | (if (.value | type) == "object" then .value.name else null end) // .key
+    | select(type == "string")' <<<"$json"
+}
+
+# rt_match_required REQUIRED NAMES
+#   REQUIRED: "context<TAB>where it is required" lines (rt_required_checks)
+#   NAMES:    "workflow<TAB>check name" lines
+# Prints "context<TAB>where<TAB>workflow" for each required check that one of
+# the named jobs produces.
+rt_match_required() {
+  local ctx src wf name
+  while IFS=$'\t' read -r ctx src; do
+    [[ -n $ctx ]] || continue
+    while IFS=$'\t' read -r wf name; do
+      [[ -n $name ]] || continue
+      if [[ $ctx == "$name" || $ctx == "$name ("* || $ctx == "$name / "* ]]; then
+        printf '%s\t%s\t%s\n' "$ctx" "$src" "$wf"
+        break
+      fi
+    done <<<"$2"
+  done <<<"$1"
+  return 0
+}
+
+# rt_required_checks -> "context<TAB>where" for every status check the
+# default branch requires: from rulesets (named) and classic branch protection.
+rt_required_checks() {
+  local ref rules id ctx
+  local -A names=()
+  ref=$(jq -rn --arg b "$RT_DEFAULT_BRANCH" '$b | @uri')
+  rules=$(gh api "repos/$RT_REPO/rules/branches/$ref" 2>/dev/null) || rules='[]'
+  while IFS=$'\t' read -r id ctx; do
+    [[ -n $ctx ]] || continue
+    if [[ -z ${names[$id]+set} ]]; then
+      names[$id]=$(gh api "repos/$RT_REPO/rulesets/$id" --jq .name 2>/dev/null) || names[$id]="#$id"
+    fi
+    printf '%s\truleset "%s"\n' "$ctx" "${names[$id]}"
+  done < <(jq -r '.[]? | select(.type == "required_status_checks") | .ruleset_id as $id
+    | .parameters.required_status_checks[]? | "\($id)\t\(.context)"' <<<"$rules")
+  gh api "repos/$RT_REPO/branches/$ref/protection/required_status_checks" --jq '.contexts[]' 2>/dev/null |
+    while IFS= read -r ctx; do printf '%s\tbranch protection\n' "$ctx"; done
+  return 0
+}
+
+# --- System packages hand-written workflows install --------------------------------
+
+# rt_workflow_apt_packages FILE -> packages installed with apt / apt-get in
+# the file's commands, one per line, unique. Continued lines ("\") are
+# joined; options, variables and anything after a shell separator are skipped.
+rt_workflow_apt_packages() {
+  local line buf='' rest word
+  local re='apt(-get)?([[:space:]]+-[^[:space:]]+)*[[:space:]]+install([^&;|>#]*)'
+  {
+    while IFS= read -r line || [[ -n $line ]]; do
+      if [[ $line == *\\ ]]; then
+        buf+="${line%\\} "
+        continue
+      fi
+      line=$buf$line buf=''
+      while [[ $line =~ $re ]]; do
+        rest=${BASH_REMATCH[3]}
+        line=${line#*"${BASH_REMATCH[0]}"}
+        # ${{ expressions }} aren't package names (and contain spaces).
+        while [[ $rest =~ \$\{\{[^}]*\}\} ]]; do rest=${rest/"${BASH_REMATCH[0]}"/ }; done
+        set -f
+        for word in $rest; do
+          [[ $word =~ ^[a-z0-9][a-z0-9.+:~=-]*$ ]] && printf '%s\n' "$word"
+        done
+        set +f
+      done
+    done <"$1"
+  } | LC_ALL=C sort -u
+}
+
+# rt_apt_suggestions CLONE -> "workflow<TAB>package package..." for each
+# hand-written workflow installing apt packages that no APT_PACKAGES /
+# <LANG>_APT_PACKAGES setting in repo-tools.conf installs. Reads workflows from
+# the commit, so ones REPLACE_WORKFLOWS already deleted from the clone count.
+rt_apt_suggestions() {
+  local dir=$1 wf file key pkgs missing p
+  local -A have=()
+  for key in "${!RT_CONF[@]}"; do
+    [[ $key == APT_PACKAGES || $key == *_APT_PACKAGES ]] || continue
+    while IFS= read -r p; do [[ -z $p ]] || have[$p]=1; done < <(rt_list "${RT_CONF[$key]}")
+  done
+  file="$(rt_tmpdir)/apt-scan.yml"
+  while IFS= read -r wf; do
+    git -C "$dir" show "HEAD:$wf" >"$file" 2>/dev/null || continue
+    grep -qF "$RT_MARKER" "$file" && continue
+    missing=''
+    while IFS= read -r p; do
+      [[ -n $p && -z ${have[$p]+set} ]] && missing+="${missing:+ }$p"
+    done < <(rt_workflow_apt_packages "$file")
+    [[ -z $missing ]] || printf '%s\t%s\n' "${wf##*/}" "$missing"
+  done < <(git -C "$dir" ls-tree -r --name-only HEAD -- .github/workflows | grep -E '\.ya?ml$' || true)
+  return 0
+}
+
+# rt_dependabot_takeover CLONE GENERATED_FILE
+# For --force on a hand-written dependabot.yml: writes what repo-tools.conf can
+# express into it (and reloads the conf), and refuses (returns 1) if anything
+# else would be dropped, unless --accept-loss. Sets RT_MIGRATED (KEY=VALUE),
+# RT_LOST and RT_NOTES for the PR description.
+rt_dependabot_takeover() {
+  local dir=$1 file="$1/$RT_DEPENDABOT_FILE" plan l
+  RT_MIGRATED=() RT_LOST=() RT_NOTES=()
+  if ! plan=$(rt_migrate_dependabot "$file" "$2"); then
+    if ((RT_ACCEPT_LOSS)); then
+      warn "can't read $RT_DEPENDABOT_FILE (needs yq, or python3 + PyYAML), so none of its settings carry over; replacing it anyway (--accept-loss)"
+      RT_LOST=("all of the hand-written file's settings (it couldn't be read)")
+      return 0
+    fi
+    warn "can't read $RT_DEPENDABOT_FILE to carry its settings over: install yq, or python3 + PyYAML (or re-run with --accept-loss to replace it anyway)"
+    return 1
+  fi
+  mapfile -t RT_LOST < <(jq -r '.lost[]' <<<"$plan")
+  mapfile -t RT_NOTES < <(jq -r '.notes[]' <<<"$plan")
+  if ((${#RT_LOST[@]})); then
+    warn "replacing $RT_DEPENDABOT_FILE would drop settings $RT_CONF_FILE can't express:"
+    for l in "${RT_LOST[@]}"; do warn "  - ${l//\`/}"; done
+    if ((!RT_ACCEPT_LOSS)); then
+      warn "leaving it alone; re-run with --accept-loss to replace it anyway"
+      return 1
+    fi
+    warn "replacing it anyway (--accept-loss)"
+  fi
+  mapfile -t RT_MIGRATED < <(jq -r '.keys[] | "\(.key)\t\(.value)"' <<<"$plan" |
+    rt_conf_append "$dir" "$RT_DEPENDABOT_FILE" "$(rt_dependabot_comments "$file")")
+  if ((${#RT_MIGRATED[@]})); then
+    rt_conf_load "$dir"
+    for l in "${RT_MIGRATED[@]}"; do info "carried over to $RT_CONF_FILE: $l"; done
+  fi
+  for l in "${RT_NOTES[@]+"${RT_NOTES[@]}"}"; do info "note: ${l//\`/}"; done
+  return 0
+}

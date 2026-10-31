@@ -734,5 +734,124 @@ out=$(RT_CONF=() && rt_list_workflows "$(new_repo)" "$(printf 'rust\t.\n')")
 assert_contains "compare lists the MSRV job" "msrv: cargo check --workspace on Cargo.toml rust-version" "$out"
 
 echo
+echo "Taking over a hand-written dependabot.yml (--force)"
+have_yaml=0
+if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then have_yaml=1; fi
+if command -v yq >/dev/null; then have_yaml=1; fi
+gen_yml="$(rt_tmpdir)/gen-dependabot.yml"
+printf '%s\n' 'version: 2' 'updates:' \
+  '  - package-ecosystem: github-actions' "    directories: ['/']" \
+  '  - package-ecosystem: cargo' "    directories: ['/']" >"$gen_yml"
+# The rule solo1-cli-rs lost when its dependabot.yml was first replaced.
+lossless=$'# boilerplate header\nversion: 2\nupdates:\n  - package-ecosystem: cargo\n    directory: /\n    schedule:\n      interval: weekly\n    ignore:\n      # rand 0.9 breaks p256 0.13.\n      # Stay on 0.8.x.\n      - dependency-name: rand\n        update-types:\n          - version-update:semver-major\n          - version-update:semver-minor\n'
+lossy=$'version: 2\nregistries:\n  r: {type: cargo-registry, url: "https://x"}\nupdates:\n  - package-ecosystem: cargo\n    directory: /\n    schedule: {interval: daily, time: "04:00"}\n    labels: [deps]\n    cooldown: {default-days: 7}\n    ignore:\n      - dependency-name: serde\n        versions: [">=2"]\n      - dependency-name: "windows-*"\n    groups: {all: {patterns: ["*"]}}\n  - package-ecosystem: npm\n    directory: /web\n    schedule: {interval: daily}\n'
+assert_eq "comments inside update entries are kept, the header isn't" \
+  "$(printf '%s\n' 'rand 0.9 breaks p256 0.13.' 'Stay on 0.8.x.')" \
+  "$(printf '%s' "$lossless" >"$(rt_tmpdir)/old.yml" && rt_dependabot_comments "$(rt_tmpdir)/old.yml")"
+if ((have_yaml)); then
+  plan=$(rt_migrate_dependabot "$(rt_tmpdir)/old.yml" "$gen_yml")
+  assert_eq "ignore rule becomes DEPENDABOT_IGNORE_CARGO" "DEPENDABOT_IGNORE_CARGO=rand:major+minor" \
+    "$(jq -r '.keys[] | "\(.key)=\(.value)"' <<<"$plan")"
+  assert_eq "nothing lost" "0" "$(jq '.lost | length' <<<"$plan")"
+  printf '%s' "$lossy" >"$(rt_tmpdir)/lossy.yml"
+  plan=$(rt_migrate_dependabot "$(rt_tmpdir)/lossy.yml" "$gen_yml")
+  assert_eq "representable settings carried over" \
+    "$(printf '%s\n' 'DEPENDABOT_IGNORE_CARGO=windows-*' DEPENDABOT_INTERVAL=daily DEPENDABOT_COOLDOWN_DAYS=7)" \
+    "$(jq -r '.keys[] | "\(.key)=\(.value)"' <<<"$plan")"
+  lost=$(jq -r '.lost[]' <<<"$plan")
+  for item in 'top-level `registries`' '`cargo`: `labels`' '`cargo`: `schedule.time`' \
+    '`cargo`: ignore rule for `serde` (versions)' '`npm`: repo-tools does not detect it here'; do
+    assert_contains "lost: $item" "$item" "$lost"
+  done
+  assert_contains "own groups noted as replaced" '`cargo`: its groups (`all`)' "$(jq -r '.notes[]' <<<"$plan")"
+
+  takeover_repo() { # CONTENT [EXISTING CONF] -> path of a repo with that dependabot.yml
+    local r
+    r=$(new_repo)
+    mk "$r" Cargo.toml '[package]'
+    mk "$r" "$RT_DEPENDABOT_FILE" "$1"
+    [[ -z ${2:-} ]] || mk "$r" "$RT_CONF_FILE" "$2"
+    commit "$r"
+    printf '%s\n' "$r"
+  }
+  repo=$(takeover_repo "$lossless")
+  rt_conf_load "$repo"
+  if rt_dependabot_takeover "$repo" "$gen_yml" 2>/dev/null; then rc=0; else rc=$?; fi
+  assert_eq "lossless takeover goes ahead" "0 DEPENDABOT_IGNORE_CARGO=rand:major+minor" "$rc ${RT_MIGRATED[*]}"
+  conf=$(cat "$repo/$RT_CONF_FILE")
+  assert_contains "new repo-tools.conf gets the usual header" "# Settings for the generated CI and dependabot.yml" "$conf"
+  assert_contains "the reason is carried over with the rule" $'# rand 0.9 breaks p256 0.13.\n# Stay on 0.8.x.\nDEPENDABOT_IGNORE_CARGO=rand:major+minor' "$conf"
+  assert_contains "conf reloaded, so the regenerated file has the rule" "dependency-name: 'rand'" "$(rt_render_dependabot "$repo")"
+
+  repo=$(takeover_repo "$lossy")
+  rt_conf_load "$repo"
+  if rt_dependabot_takeover "$repo" "$gen_yml" 2>/dev/null; then rc=0; else rc=$?; fi
+  assert_eq "lossy takeover refused, nothing written" "1 absent" \
+    "$rc $([[ -e $repo/$RT_CONF_FILE ]] && echo present || echo absent)"
+  if RT_ACCEPT_LOSS=1 rt_dependabot_takeover "$repo" "$gen_yml" 2>/dev/null; then rc=0; else rc=$?; fi
+  assert_eq "--accept-loss goes ahead and records what was lost" "0 yes" \
+    "$rc $( ((${#RT_LOST[@]} >= 5)) && echo yes || echo no)"
+
+  repo=$(takeover_repo "$lossless" $'# mine\nDEPENDABOT_IGNORE_CARGO=rand:major')
+  rt_conf_load "$repo"
+  out=$(rt_dependabot_takeover "$repo" "$gen_yml" 2>&1)
+  assert_eq "a key the conf already sets is kept" $'# mine\nDEPENDABOT_IGNORE_CARGO=rand:major' "$(cat "$repo/$RT_CONF_FILE")"
+  assert_contains "and the difference reported" "already sets DEPENDABOT_IGNORE_CARGO=rand:major; keeping it" "$out"
+  RT_CONF=()
+fi
+
+echo
+echo "Required checks from workflows REPLACE_WORKFLOWS removes"
+if ((have_yaml)); then
+  printf '%s\n' 'on: push' 'jobs:' '  test:' '    name: build & test' '    runs-on: x' \
+    '  audit:' '    runs-on: x' '  matrix:' '    name: lint' '    runs-on: x' >"$(rt_tmpdir)/old-ci.yml"
+  assert_eq "check names: job name, else its key" "$(printf '%s\n' 'build & test' audit lint)" \
+    "$(rt_workflow_check_names "$(rt_tmpdir)/old-ci.yml")"
+fi
+required=$(printf '%s\t%s\n' 'build & test' 'ruleset "Main Branch"' 'lint (ubuntu, 1.85)' 'branch protection' \
+  'build' 'ruleset "Other"' "$RT_CI_CHECK_NAME" 'ruleset "repo-tools: default branch"' 'tests / unit' 'ruleset "X"')
+names=$(printf '%s\t%s\n' ci.yml 'build & test' ci.yml audit ci.yml lint other.yml tests)
+assert_eq "exact, matrix and reusable-workflow names matched; prefixes alone aren't" \
+  "$(printf '%s\t%s\t%s\n' 'build & test' 'ruleset "Main Branch"' ci.yml 'lint (ubuntu, 1.85)' 'branch protection' ci.yml \
+    'tests / unit' 'ruleset "X"' other.yml)" \
+  "$(rt_match_required "$required" "$names")"
+gh() { # rules API stub: two rulesets, classic protection off (404)
+  case $2 in
+    repos/test/repo/rules/branches/main)
+      echo '[{"type":"deletion","ruleset_id":1},
+        {"type":"required_status_checks","ruleset_id":1,"parameters":{"required_status_checks":[{"context":"build & test","integration_id":15368}]}},
+        {"type":"required_status_checks","ruleset_id":2,"parameters":{"required_status_checks":[{"context":"CI OK"}]}}]' ;;
+    repos/test/repo/rulesets/1) echo "Main Branch" ;;
+    repos/test/repo/rulesets/2) echo "repo-tools: default branch" ;;
+    *) return 1 ;;
+  esac
+}
+RT_REPO=test/repo RT_DEFAULT_BRANCH=main
+assert_eq "required checks listed with the ruleset requiring them" \
+  "$(printf '%s\t%s\n' 'build & test' 'ruleset "Main Branch"' 'CI OK' 'ruleset "repo-tools: default branch"')" \
+  "$(rt_required_checks)"
+unset -f gh
+
+echo
+echo "System packages installed by hand-written workflows"
+printf '%s\n' 'jobs:' '  t:' '    steps:' \
+  '      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config' \
+  '      - run: |' '          sudo apt-get -qq install --no-install-recommends \' \
+  '            libssl-dev "$EXTRA" ${{ matrix.pkg }}; echo done' \
+  '          apt install foo=1.2 # comment' '          echo apt-get install' >"$(rt_tmpdir)/apt.yml"
+assert_eq "packages from apt / apt-get install, options and variables skipped" \
+  "$(printf '%s\n' foo=1.2 libssl-dev libudev-dev pkg-config)" "$(rt_workflow_apt_packages "$(rt_tmpdir)/apt.yml")"
+repo=$(new_repo)
+mk "$repo" .github/workflows/ci.yml "$(cat "$(rt_tmpdir)/apt.yml")"
+mk "$repo" "$RT_CI_FILE" $'# Managed by repo-tools\n run: apt-get install skipped-pkg'
+mk "$repo" "$RT_CONF_FILE" 'RUST_APT_PACKAGES=pkg-config libudev-dev'
+commit "$repo"
+git -C "$repo" rm -q .github/workflows/ci.yml # as REPLACE_WORKFLOWS would; still read from the commit
+rt_conf_load "$repo"
+assert_eq "suggests only what no *_APT_PACKAGES setting installs; managed files skipped" \
+  "$(printf '%s\t%s\n' ci.yml 'foo=1.2 libssl-dev')" "$(rt_apt_suggestions "$repo")"
+RT_CONF=()
+
+echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 ((FAIL == 0))
