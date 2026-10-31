@@ -413,5 +413,69 @@ PY
 fi
 
 echo
+echo "Failure annotations (rt-run step shell)"
+if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
+  wrapped="$(rt_tmpdir)/wrapped"
+  mkdir -p "$wrapped"
+  # Writes each workflow's rt-run script and every step run through it; prints
+  # how many distinct rt-run scripts there are, then any job missing the setup.
+  out=$(python3 - "$wrapped" "$ROOT"/.github/workflows/{python,node,rust,jvm,terraform,ansible,shell}.yml <<'PY'
+import os, re, sys, yaml
+dest, files = sys.argv[1], sys.argv[2:]
+scripts, problems = set(), []
+for f in files:
+    wf = os.path.basename(f)
+    for job_id, job in yaml.safe_load(open(f))["jobs"].items():
+        steps = job.get("steps", [])
+        setup = [s for s in steps if s.get("name") == "Set up failure annotations"]
+        users = [s for s in steps if str(s.get("shell", "")).startswith("rt-run ")]
+        if users and not setup:
+            problems.append(f"{wf}:{job_id} uses rt-run without setting it up")
+        for s in setup:
+            m = re.search(r"<<'RT_EOF'\n(.*?)\nRT_EOF\n", s["run"], re.S)
+            scripts.add(m.group(1) + "\n")
+        for i, s in enumerate(users):
+            if not s["shell"].endswith(" {0}"):
+                problems.append(f"{wf}:{job_id}:{s['name']}: shell must end in {{0}}")
+            open(os.path.join(dest, f"{wf}-{job_id}-{i}.sh"), "w").write(s["run"])
+open(os.path.join(dest, "rt-run"), "w").write(next(iter(scripts)))
+print(len(scripts))
+print("\n".join(problems))
+PY
+  )
+  assert_eq "rt-run script identical in every workflow" "1" "$(head -n1 <<<"$out")"
+  assert_eq "every job using rt-run sets it up" "" "$(tail -n +2 <<<"$out")"
+  chmod +x "$wrapped/rt-run"
+  if command -v shellcheck >/dev/null; then
+    # actionlint only shellchecks steps whose shell is bash, so check these here
+    # (SC1091: sourced helpers live on the runner; actionlint skips it too).
+    if out=$(shellcheck -s bash -e SC1091,SC2148 "$wrapped"/*.sh "$wrapped/rt-run" 2>&1); then
+      pass "steps run through rt-run pass shellcheck"
+    else
+      fail "steps run through rt-run pass shellcheck" "$out"
+    fi
+  fi
+  printf '%s\n' 'echo "   Compiling foo v1.0.0"' 'echo noise' \
+    "printf '\\033[1;31merror[E0308]\\033[0m: mismatched types (100%%)\\n'" 'echo "  --> src/main.rs:3:5"' \
+    'false' 'echo not reached' >"$wrapped/fail.sh"
+  if out=$("$wrapped/rt-run" Lint "$wrapped/fail.sh" 2>&1); then rc=0; else rc=$?; fi
+  assert_eq "rt-run keeps the step's exit status" "1" "$rc"
+  assert_contains "step output still printed" "noise" "$out"
+  assert_contains "annotation from the first diagnostic, colour stripped, escaped" \
+    "::error title=Lint failed (exit 1)::error[E0308]: mismatched types (100%25)%0A  --> src/main.rs:3:5" "$out"
+  assert_not_contains "-e stops the script, as with GitHub's bash" "not reached" "$out"
+  printf '%s\n' 'echo one' 'echo two' 'exit 3' >"$wrapped/plain.sh"
+  out=$("$wrapped/rt-run" Extra checks "$wrapped/plain.sh" 2>&1) || rc=$?
+  assert_eq "exit status passed through" "3" "$rc"
+  assert_contains "no diagnostic: end of output; multi-word title" "::error title=Extra checks failed (exit 3)::one%0Atwo" "$out"
+  printf '%s\n' 'echo fine' >"$wrapped/ok.sh"
+  out=$("$wrapped/rt-run" Test "$wrapped/ok.sh" 2>&1)
+  assert_eq "success: output only, no annotation" "fine" "$out"
+  printf '%s\n' 'false | true' >"$wrapped/pipe.sh"
+  if "$wrapped/rt-run" Test "$wrapped/pipe.sh" >/dev/null 2>&1; then rc=0; else rc=$?; fi
+  assert_eq "pipefail, as with GitHub's bash" "1" "$rc"
+fi
+
+echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 ((FAIL == 0))

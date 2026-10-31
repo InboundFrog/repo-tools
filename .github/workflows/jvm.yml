@@ -75,6 +75,41 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up failure annotations
+        run: |
+          # Writes the rt-run step shell used below; see the comment inside it.
+          mkdir -p "$RUNNER_TEMP/rt-bin"
+          cat >"$RUNNER_TEMP/rt-bin/rt-run" <<'RT_EOF'
+          #!/usr/bin/env bash
+          # Step shell ("shell: rt-run TITLE {0}"): runs the step script the way GitHub's
+          # bash shell does and, if it fails, repeats the important part of its output
+          # as an error annotation, so the failure can be read through the checks API
+          # without downloading the log. Portable to bash 3.2 and BSD tools (macOS).
+          script=${!#}
+          title=${*:1:$#-1}
+          log=$(mktemp)
+          bash --noprofile --norc -eo pipefail "$script" 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            esc=$(printf '\033')
+            clean=$(sed -E "s/${esc}\[[0-9;]*[A-Za-z]//g" "$log" |
+              grep -v -E '^[[:space:]]*(Compiling|Checking|Downloaded|Downloading|Updating|Locking|Adding|Fresh|Blocking|Running|Finished|Installing|Installed|Resolved|Prepared|Audited) ' || true)
+            # Prefer everything from the first compiler-style diagnostic onwards,
+            # else the end of the output.
+            diag=$(printf '%s\n' "$clean" | sed -n -E '/^(error|warning)(\[|:)/,$p' | head -n 200)
+            body=${diag:-$(printf '%s\n' "$clean" | tail -n 100)}
+            body=$(printf '%s' "$body" | head -c 30000)
+            body=${body//'%'/'%25'}
+            body=${body//$'\r'/'%0D'}
+            body=${body//$'\n'/'%0A'}
+            echo "::error title=${title:-Step} failed (exit $status)::$body"
+          fi
+          rm -f "$log"
+          exit "$status"
+          RT_EOF
+          chmod +x "$RUNNER_TEMP/rt-bin/rt-run"
+          echo "$RUNNER_TEMP/rt-bin" >>"$GITHUB_PATH"
+
       - name: Install system packages
         if: inputs.apt-packages != '' && runner.os == 'Linux'
         env:
@@ -124,6 +159,7 @@ jobs:
         uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
 
       - name: Lint
+        shell: rt-run Lint {0}
         env:
           CMD: ${{ inputs.lint-command }}
           TOOL: ${{ steps.detect.outputs.tool }}
@@ -140,6 +176,7 @@ jobs:
           fi
 
       - name: Test
+        shell: rt-run Test {0}
         env:
           CMD: ${{ inputs.test-command }}
           TOOL: ${{ steps.detect.outputs.tool }}
@@ -154,6 +191,7 @@ jobs:
           fi
 
       - name: Build
+        shell: rt-run Build {0}
         env:
           CMD: ${{ inputs.build-command }}
           TOOL: ${{ steps.detect.outputs.tool }}
@@ -168,6 +206,7 @@ jobs:
           fi
 
       - name: Extra checks
+        shell: rt-run Extra checks {0}
         if: inputs.extra-command != '' && inputs.extra-command != 'skip'
         env:
           CMD: ${{ inputs.extra-command }}

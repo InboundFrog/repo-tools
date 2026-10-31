@@ -77,6 +77,12 @@ CI run**. To stage changes, set `RT_REF` (e.g. to a `v1` tag) when running
 `repo-ci`. This repo's own Dependabot config keeps the actions in these
 workflows current, and those bumps roll out the same way.
 
+When a lint, test, build or extra step fails, its output (from the first
+`error`/`warning` diagnostic, else the last 100 lines, colour codes and cargo
+progress lines removed) is repeated as an error annotation. The failure can
+then be read from the checks API, or by an agent fixing CI, without
+downloading the log.
+
 A final `CI OK` job passes only if every language job passed. It's the single
 check branch protection requires, so the ruleset doesn't need to know which
 languages a repo uses.
