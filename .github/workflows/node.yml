@@ -53,8 +53,11 @@ on:
 permissions:
   contents: read
 
+# Tool versions installed by this workflow. Pinned so every caller runs the same,
+# reviewed release; Dependabot can't see these, so bump them by hand.
 env:
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+  RT_COREPACK_VERSION: 0.36.0
 
 jobs:
   check:
@@ -166,7 +169,7 @@ jobs:
         run: |
           source "$RUNNER_TEMP/node-helpers.sh"
           if [[ $PM != npm ]]; then
-            command -v corepack >/dev/null || npm install -g corepack
+            command -v corepack >/dev/null || npm install -g "corepack@$RT_COREPACK_VERSION"
             corepack enable
           fi
           case $PM in
@@ -243,10 +246,12 @@ jobs:
           dir=${dir%/}
           [[ $dir != . ]] || dir=''
           read -ra paths <<<"${PATHS//$'\n'/ }"
+          # Unique delimiter, so no path can end the multiline value early.
+          delim="RT_EOF_${RANDOM}${RANDOM}${RANDOM}"
           {
-            echo 'paths<<RT_EOF'
+            echo "paths<<$delim"
             for p in "${paths[@]}"; do printf '%s%s\n' "${dir:+$dir/}" "$p"; done
-            echo 'RT_EOF'
+            echo "$delim"
           } >>"$GITHUB_OUTPUT"
           os=$(tr '[:upper:]' '[:lower:]' <<<"$RUNNER_OS")
           name="${NAME:-build}-$os${dir:+-$dir}"

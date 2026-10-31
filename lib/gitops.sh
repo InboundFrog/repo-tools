@@ -15,6 +15,15 @@ rt_clone() {
 rt_write_managed() {
   local dest="$1/$2" content
   content=$(cat)
+  if ! rt_path_inside "$1" "$2"; then
+    # Never --force-able: writing through it would land outside the clone.
+    warn "$2 (or a directory above it) is a symlink; refusing to write it"
+    return 1
+  fi
+  if [[ -e $dest && ! -f $dest ]]; then
+    warn "$2 exists and isn't a regular file; leaving it alone"
+    return 1
+  fi
   if [[ -f $dest ]] && ! grep -qF "$RT_MARKER" "$dest"; then
     if ((RT_FORCE)); then
       warn "$2 exists and isn't managed by repo-tools; replacing it (--force)"
@@ -31,6 +40,11 @@ rt_write_managed() {
 # Commits PATHs to BRANCH and opens (or refreshes) a PR against the default
 # branch. Does nothing if the default branch, or the open PR branch, already
 # has identical content — so re-running is cheap and doesn't spam CI.
+#
+# "Identical" means the whole tree, not just PATHs: anything else someone
+# pushed to BRANCH (which the PR would then quietly carry) is overwritten.
+# Only same-repo PRs count as ours; a fork can open a PR from a branch with
+# the same name, and must not be reported as the repo-tools PR.
 rt_publish_pr() {
   local dir=$1 branch=$2 title=$3 body=$4 url
   shift 4
@@ -50,7 +64,7 @@ rt_publish_pr() {
   fi
 
   if "${g[@]}" fetch --quiet --depth 1 origin "refs/heads/$branch" 2>/dev/null &&
-    "${g[@]}" diff --cached --quiet FETCH_HEAD -- "$@"; then
+    "${g[@]}" diff --cached --quiet FETCH_HEAD; then
     ok "branch '$branch' already has these changes"
   else
     "${g[@]}" commit --quiet -m "$title" -m "$body" -- "$@"
@@ -58,7 +72,8 @@ rt_publish_pr() {
     ok "pushed '$branch'"
   fi
 
-  url=$(gh pr list -R "$RT_REPO" --head "$branch" --state open --json url --jq '.[0].url // empty')
+  url=$(gh pr list -R "$RT_REPO" --head "$branch" --state open --json url,isCrossRepository \
+    --jq 'map(select(.isCrossRepository | not)) | .[0].url // empty')
   if [[ -n $url ]]; then
     ok "PR already open: $url"
   else
@@ -81,7 +96,9 @@ rt_replace_workflows() {
       continue
     fi
     path=.github/workflows/$wf
-    if [[ $path == "$RT_CI_FILE" ]] || { [[ -f $dir/$path ]] && grep -qF "$RT_MARKER" "$dir/$path"; }; then
+    if ! rt_path_inside "$dir" "$path"; then
+      warn "REPLACE_WORKFLOWS: $path (or a directory above it) is a symlink; not removing it"
+    elif [[ $path == "$RT_CI_FILE" ]] || { [[ -f $dir/$path ]] && grep -qF "$RT_MARKER" "$dir/$path"; }; then
       warn "REPLACE_WORKFLOWS: $path is managed by repo-tools; not removing it"
     elif [[ -f $dir/$path ]]; then
       rm -- "$dir/$path"

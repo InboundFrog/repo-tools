@@ -86,7 +86,9 @@ fi
 
 if ((compare)); then
   printf '\n--- %s: existing vs repo-tools ---\n' "$RT_DEPENDABOT_FILE"
-  if [[ -f $dir/$RT_DEPENDABOT_FILE ]]; then
+  if ! rt_path_inside "$dir" "$RT_DEPENDABOT_FILE"; then
+    echo "  (existing file is a symlink; not read, and repo-dependabot won't replace it)"
+  elif [[ -f $dir/$RT_DEPENDABOT_FILE ]]; then
     grep -qF "$RT_MARKER" "$dir/$RT_DEPENDABOT_FILE" &&
       echo "  (existing file is managed by repo-tools; it will be replaced)"
     rt_render_dependabot "$dir" >"$(rt_tmpdir)/dependabot.yml"

@@ -73,6 +73,11 @@ declares `rust-version` is also checked (`cargo check`) on that toolchain;
 
 Actions in these workflows are pinned to commit SHAs (with the version in a
 comment), since they run in every repo. Dependabot updates the SHAs and comments.
+Tools the workflows install themselves (uv, ruff, poetry, pytest, corepack,
+cargo-audit, ansible-lint, Terraform, tflint) are pinned too, in each workflow's
+top-level `env:` (`RT_*_VERSION`). Dependabot can't see those, so bump them by hand.
+A project's own tool versions still win: ruff or pytest from its dependencies,
+Terraform from `.terraform-version`.
 
 Callers pin `@main`, so **a change merged here applies to every repo on its next
 CI run**. To stage changes, set `RT_REF` (e.g. to a `v1` tag) when running
@@ -146,6 +151,25 @@ you'd rather switch.
 **Free plan limits:** rulesets, secret scanning and CodeQL only work on public repos.
 Private repos still get Dependabot, CI and delete-branch-on-merge, but CI isn't
 *enforced*. With GitHub Pro, pass `--include-private` to apply rulesets there too.
+
+## Security model
+
+- **Target repos are untrusted input.** Their files and `.github/repo-tools.conf`
+  are read as data: config values are never evaluated by the scripts, and
+  repo-tools refuses to read, write or delete through a symlink in a target
+  repo (`.github` itself included), even with `--force`.
+- **No `${{ }}` in config.** Values end up in the generated workflow, where
+  GitHub would evaluate expressions before the reusable workflow runs them as
+  commands. Use environment variables (`$GITHUB_HEAD_REF`, ...) in commands instead.
+- **Branches and PRs.** `repo-tools/*` branches are force-pushed whenever their
+  tree differs from what repo-tools would commit, so nothing else can ride along
+  in a repo-tools PR. PRs from forks are never mistaken for the repo-tools PR.
+- **`@main` is a trust decision.** Every caller runs whatever is on this repo's
+  `main` (or `RT_REF`) on its next CI run, so protect this repo's default
+  branch (`bin/repo-protect InboundFrog/repo-tools`) and review action bumps here.
+- **CI checks are not a security gate.** `pull_request` runs use the PR's own
+  copy of the workflow, so `CI OK` guards against mistakes, not against someone
+  with write access. Use `RT_APPROVALS` (and CODEOWNERS) for that.
 
 ## Development
 

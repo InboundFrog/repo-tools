@@ -53,6 +53,14 @@ on:
 permissions:
   contents: read
 
+# Tool versions installed by this workflow. Pinned so every caller runs the same,
+# reviewed release; Dependabot can't see these, so bump them by hand.
+env:
+  RT_UV_VERSION: 0.13.6
+  RT_RUFF_VERSION: 0.17.3
+  RT_POETRY_VERSION: 2.5.1
+  RT_PYTEST_VERSION: 9.2.0
+
 jobs:
   check:
     name: Lint, test & build
@@ -130,6 +138,8 @@ jobs:
           python-version: ${{ steps.python.outputs.version }}
 
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: ${{ env.RT_UV_VERSION }}
 
       - name: Install dependencies
         shell: rt-run Install dependencies {0}
@@ -137,7 +147,7 @@ jobs:
           if [[ -f uv.lock ]]; then
             uv sync --all-extras --dev
           elif [[ -f poetry.lock ]]; then
-            POETRY_VIRTUALENVS_IN_PROJECT=true uvx poetry install --no-interaction --all-extras
+            POETRY_VIRTUALENVS_IN_PROJECT=true uvx "poetry@$RT_POETRY_VERSION" install --no-interaction --all-extras
           else
             uv venv .venv --python "$(command -v python)"
             export VIRTUAL_ENV=$PWD/.venv
@@ -160,7 +170,7 @@ jobs:
             skip) echo "Lint skipped"; exit 0 ;;
             ?*) eval "$CMD"; exit ;;
           esac
-          ruff() { if command -v ruff >/dev/null; then command ruff "$@"; else uvx ruff "$@"; fi; }
+          ruff() { if command -v ruff >/dev/null; then command ruff "$@"; else uvx "ruff@$RT_RUFF_VERSION" "$@"; fi; }
           ruff check --output-format=github .
           if [[ -f ruff.toml || -f .ruff.toml ]] || grep -qs '^\[tool\.ruff' pyproject.toml; then
             ruff format --check .
@@ -175,7 +185,7 @@ jobs:
             skip) echo "Tests skipped"; exit 0 ;;
             ?*) eval "$CMD"; exit ;;
           esac
-          python -c 'import pytest' 2>/dev/null || uv pip install pytest
+          python -c 'import pytest' 2>/dev/null || uv pip install "pytest==$RT_PYTEST_VERSION"
           rc=0
           python -m pytest || rc=$?
           if ((rc == 5)); then echo "No tests collected"; exit 0; fi
@@ -216,10 +226,12 @@ jobs:
           dir=${dir%/}
           [[ $dir != . ]] || dir=''
           read -ra paths <<<"${PATHS//$'\n'/ }"
+          # Unique delimiter, so no path can end the multiline value early.
+          delim="RT_EOF_${RANDOM}${RANDOM}${RANDOM}"
           {
-            echo 'paths<<RT_EOF'
+            echo "paths<<$delim"
             for p in "${paths[@]}"; do printf '%s%s\n' "${dir:+$dir/}" "$p"; done
-            echo 'RT_EOF'
+            echo "$delim"
           } >>"$GITHUB_OUTPUT"
           os=$(tr '[:upper:]' '[:lower:]' <<<"$RUNNER_OS")
           name="${NAME:-build}-$os${dir:+-$dir}"

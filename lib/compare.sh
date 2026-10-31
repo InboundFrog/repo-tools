@@ -154,6 +154,7 @@ _rt_in_replace() { # WORKFLOW_FILE_NAME
 rt_overlapping_workflows() {
   local dir=$1 wf json
   while IFS= read -r wf; do
+    rt_path_inside "$dir" "$wf" || continue
     grep -qF "$RT_MARKER" "$dir/$wf" && continue
     _rt_in_replace "${wf##*/}" && continue
     if json=$(rt_yaml_to_json "$dir/$wf" 2>/dev/null); then
@@ -175,11 +176,15 @@ rt_overlapping_workflows() {
 # Lists existing workflows (jobs, actions and commands), then the jobs the
 # generated CI would run, so the two can be compared by eye.
 rt_list_workflows() {
-  local dir=$1 plan=$2 wf json lang dirs kind val steps
-  local -a files=()
+  local dir=$1 plan=$2 wf json lang dirs kind val i
+  local -a files=() steps=()
   mapfile -t files < <(cd "$dir" && git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml')
   echo "Existing:"
   for wf in "${files[@]+"${files[@]}"}"; do
+    if ! rt_path_inside "$dir" "$wf"; then
+      echo "  ${wf##*/}  (symlink; not read)"
+      continue
+    fi
     if grep -qF "$RT_MARKER" "$dir/$wf"; then
       echo "  ${wf##*/}  (managed by repo-tools; would be regenerated)"
       continue
@@ -200,14 +205,23 @@ rt_list_workflows() {
   echo "repo-tools ($RT_CI_FILE):"
   while IFS=$'\t' read -r lang dirs; do
     [[ -n $lang ]] || continue
-    steps=${RT_DEFAULT_STEPS[$lang]}
-    for kind in lint test build audit msrv; do
+    # One entry per "kind: description". Overrides are spliced in with plain
+    # string operations: config values are untrusted data and must never reach
+    # a sed/awk program (GNU sed's s///e flag runs the pattern space as a command).
+    IFS='|' read -ra steps <<<"${RT_DEFAULT_STEPS[$lang]}"
+    for i in "${!steps[@]}"; do
+      steps[i]=${steps[i]#"${steps[i]%%[![:space:]]*}"}
+      steps[i]=${steps[i]%"${steps[i]##*[![:space:]]}"}
+      kind=${steps[i]%%:*}
+      case $kind in lint | test | build | audit | msrv) ;; *) continue ;; esac
       val=$(rt_conf "${lang^^}_${kind^^}")
-      [[ -z $val ]] || steps=$(sed -E "s#${kind}: [^|]*#${kind}: ${val//#/\\#} (override) #" <<<"$steps")
+      [[ -z $val ]] || steps[i]="$kind: $val (override)"
     done
     # bats only runs when there are tests to run.
     if [[ $lang == shell && -z $(rt_conf SHELL_TEST) && -z $(git -C "$dir" ls-files '*.bats') ]]; then
-      steps=${steps/test: bats/test: bats (skipped: no *.bats files)}
+      for i in "${!steps[@]}"; do
+        [[ ${steps[i]} != "test: bats" ]] || steps[i]="test: bats (skipped: no *.bats files)"
+      done
     fi
     echo "    job $lang  (dirs: $dirs)"
     val=$(rt_conf "${lang^^}_OS" "$(rt_conf OS)")
@@ -220,10 +234,10 @@ rt_list_workflows() {
       [[ -z $val ]] || echo "      ${pair#*:}: $val"
     done
     val=$(rt_conf "${lang^^}_EXTRA")
-    [[ -z $val || $val == skip ]] || steps+=" | extra: $val"
+    [[ -z $val || $val == skip ]] || steps+=("extra: $val")
     val=$(rt_conf "${lang^^}_ARTIFACTS")
-    [[ -z $val ]] || steps+=" | artifacts: $(rt_list "$val" | paste -sd' ' -)"
-    tr '|' '\n' <<<"$steps" | sed -E 's/^ +//; s/ +$//; s/^/      /'
+    [[ -z $val ]] || steps+=("artifacts: $(rt_list "$val" | paste -sd' ' -)")
+    printf '      %s\n' "${steps[@]}"
   done <<<"$plan"
   echo "    job ci-ok \"$RT_CI_CHECK_NAME\"  (the check branch protection requires)"
 }

@@ -40,6 +40,12 @@ die() {
   exit 1
 }
 
+# Both end up verbatim in the generated workflow's `uses:` line.
+[[ $RT_SOURCE_REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+  die "RT_SOURCE_REPO must look like owner/name (got: $RT_SOURCE_REPO)"
+[[ $RT_REF =~ ^[A-Za-z0-9_.][A-Za-z0-9_./-]*$ && $RT_REF != *..* ]] ||
+  die "RT_REF must be a branch, tag or commit SHA (got: $RT_REF)"
+
 rt_require() {
   local c
   for c in "$@"; do
@@ -91,8 +97,11 @@ rt_owner() {
   printf '%s\n' "$RT_OWNER"
 }
 
-# "name" -> "owner/name"; "owner/name" passes through.
+# "name" -> "owner/name"; "owner/name" passes through. Anything else (an
+# option-like "-x", a URL, a path) is refused before it reaches gh.
 rt_resolve_repo() {
+  [[ $1 =~ ^[A-Za-z0-9_.][A-Za-z0-9_.-]*(/[A-Za-z0-9_.][A-Za-z0-9_.-]*)?$ && /$1/ != */./* && /$1/ != */../* ]] ||
+    die "not a repository name: '$1' (expected owner/name or name)"
   if [[ $1 == */* ]]; then printf '%s\n' "$1"; else printf '%s/%s\n' "$(rt_owner)" "$1"; fi
 }
 
@@ -168,6 +177,26 @@ rt_api() {
   fi
 }
 
+# --- Paths inside a target repo checkout -------------------------------------------
+
+# rt_path_inside DIR RELPATH
+# Succeeds if RELPATH stays inside DIR: relative, no ".." component, and no
+# existing component (the file itself included) is a symlink. Target repos are
+# untrusted input, and a committed symlink (".github -> /home/me") would
+# otherwise make repo-tools read, write or delete files outside the clone.
+rt_path_inside() {
+  local path=$1 part
+  local -a parts
+  [[ -n $2 && $2 != /* ]] || return 1
+  IFS=/ read -ra parts <<<"$2"
+  for part in "${parts[@]}"; do
+    [[ -n $part && $part != . ]] || continue
+    [[ $part != .. ]] || return 1
+    path+=/$part
+    [[ ! -L $path ]] || return 1
+  done
+}
+
 # --- Per-repo config (.github/repo-tools.conf) --------------------------------------
 
 declare -gA RT_CONF=()
@@ -176,6 +205,7 @@ declare -gA RT_CONF=()
 rt_conf_load() {
   local file="$1/$RT_CONF_FILE" line key val
   RT_CONF=()
+  rt_path_inside "$1" "$RT_CONF_FILE" || die "$RT_CONF_FILE (or a directory above it) is a symlink; refusing to read it"
   [[ -f $file ]] || return 0
   while IFS= read -r line || [[ -n $line ]]; do
     line=${line%$'\r'}
@@ -189,12 +219,35 @@ rt_conf_load() {
     elif [[ $val =~ ^(.*[^[:space:]])[[:space:]]+#.*$ ]]; then
       val=${BASH_REMATCH[1]} # unquoted: drop a trailing " # comment"
     fi
+    # Control characters (e.g. terminal escape sequences) have no legitimate
+    # use here, and values are echoed to the terminal and into PRs.
+    if [[ $val == *[[:cntrl:]]* ]]; then
+      warn "$RT_CONF_FILE: $key contains control characters; ignoring it"
+      continue
+    fi
     RT_CONF[$key]=$val
   done <"$file"
 }
 
 # rt_conf KEY [DEFAULT]
 rt_conf() { printf '%s\n' "${RT_CONF[$1]:-${2:-}}"; }
+
+# "name<TAB>dir,dir" lines (a CI plan or ecosystem list) -> a Markdown list for
+# PR bodies. Directory names come from the target repo, so each is put in a
+# code span: a directory like "@org" must not mention (notify) anyone.
+rt_md_plan() {
+  local name dirs d out
+  while IFS=$'\t' read -r name dirs; do
+    [[ -n $name ]] || continue
+    out=''
+    while IFS= read -r d; do
+      d=${d//\`/\'}
+      out+="${out:+, }\`$d\`"
+    done < <(tr ',' '\n' <<<"$dirs")
+    # shellcheck disable=SC2016 # Markdown backticks
+    printf -- '- `%s`: %s\n' "$name" "$out"
+  done
+}
 
 # Splits a comma/space separated list into lines.
 rt_list() {
