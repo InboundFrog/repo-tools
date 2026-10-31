@@ -571,8 +571,8 @@ all_wfs=$(cat "${wfs[@]}")
 for var in RT_UV_VERSION RT_RUFF_VERSION RT_POETRY_VERSION RT_PYTEST_VERSION RT_COREPACK_VERSION \
   RT_CARGO_AUDIT_VERSION RT_TERRAFORM_VERSION RT_TFLINT_VERSION; do
   # Defined once (top-level env, a version) and used at least once.
-  defs=$(grep -cE -- "^  $var: v?[0-9]" <<<"$all_wfs" || true)
-  uses=$(grep -c -- "$var[^:]" <<<"$all_wfs" || true)
+  defs=$(grep -cE -- "^  ${var}: v?[0-9]" <<<"$all_wfs" || true)
+  uses=$(grep -c -- "${var}[^:]" <<<"$all_wfs" || true)
   assert_eq "$var defined once and used" "1 yes" "$defs $([[ $uses -ge 1 ]] && echo yes || echo no)"
 done
 assert_contains "ansible-lint pinned by default" "default: 26." "$(sed -n '/ansible-lint-version:/,/default:/p' "$ROOT/.github/workflows/ansible.yml")"
