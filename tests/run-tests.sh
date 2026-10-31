@@ -759,10 +759,12 @@ if ((have_yaml)); then
     "$(printf '%s\n' 'DEPENDABOT_IGNORE_CARGO=windows-*' DEPENDABOT_INTERVAL=daily DEPENDABOT_COOLDOWN_DAYS=7)" \
     "$(jq -r '.keys[] | "\(.key)=\(.value)"' <<<"$plan")"
   lost=$(jq -r '.lost[]' <<<"$plan")
+  # shellcheck disable=SC2016 # literal Markdown backticks
   for item in 'top-level `registries`' '`cargo`: `labels`' '`cargo`: `schedule.time`' \
     '`cargo`: ignore rule for `serde` (versions)' '`npm`: repo-tools does not detect it here'; do
     assert_contains "lost: $item" "$item" "$lost"
   done
+  # shellcheck disable=SC2016 # literal Markdown backticks
   assert_contains "own groups noted as replaced" '`cargo`: its groups (`all`)' "$(jq -r '.notes[]' <<<"$plan")"
 
   takeover_repo() { # CONTENT [EXISTING CONF] -> path of a repo with that dependabot.yml
@@ -810,11 +812,11 @@ if ((have_yaml)); then
 fi
 required=$(printf '%s\t%s\n' 'build & test' 'ruleset "Main Branch"' 'lint (ubuntu, 1.85)' 'branch protection' \
   'build' 'ruleset "Other"' "$RT_CI_CHECK_NAME" 'ruleset "repo-tools: default branch"' 'tests / unit' 'ruleset "X"')
-names=$(printf '%s\t%s\n' ci.yml 'build & test' ci.yml audit ci.yml lint other.yml tests)
+produced=$(printf '%s\t%s\n' ci.yml 'build & test' ci.yml audit ci.yml lint other.yml tests)
 assert_eq "exact, matrix and reusable-workflow names matched; prefixes alone aren't" \
   "$(printf '%s\t%s\t%s\n' 'build & test' 'ruleset "Main Branch"' ci.yml 'lint (ubuntu, 1.85)' 'branch protection' ci.yml \
     'tests / unit' 'ruleset "X"' other.yml)" \
-  "$(rt_match_required "$required" "$names")"
+  "$(rt_match_required "$required" "$produced")"
 gh() { # rules API stub: two rulesets, classic protection off (404)
   case $2 in
     repos/test/repo/rules/branches/main)
@@ -834,6 +836,7 @@ unset -f gh
 
 echo
 echo "System packages installed by hand-written workflows"
+# shellcheck disable=SC1003,SC2016 # a workflow fixture: literal \ and ${{ }}
 printf '%s\n' 'jobs:' '  t:' '    steps:' \
   '      - run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config' \
   '      - run: |' '          sudo apt-get -qq install --no-install-recommends \' \

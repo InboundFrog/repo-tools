@@ -434,7 +434,7 @@ rt_workflow_apt_packages() {
 # <LANG>_APT_PACKAGES setting in repo-tools.conf installs. Reads workflows from
 # the commit, so ones REPLACE_WORKFLOWS already deleted from the clone count.
 rt_apt_suggestions() {
-  local dir=$1 wf file key pkgs missing p
+  local dir=$1 wf file key missing p
   local -A have=()
   for key in "${!RT_CONF[@]}"; do
     [[ $key == APT_PACKAGES || $key == *_APT_PACKAGES ]] || continue

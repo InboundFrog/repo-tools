@@ -284,13 +284,20 @@ rt_conf_append() {
   ((${#lines[@]})) || return 0
   rt_path_inside "$dir" "$RT_CONF_FILE" || die "$RT_CONF_FILE (or a directory above it) is a symlink; refusing to write it"
   mkdir -p "$(dirname "$file")"
+  local start=newline
+  if [[ ! -s $file ]]; then
+    start=header
+  elif [[ -n $(tail -c1 "$file") ]]; then
+    start=unterminated # the file doesn't end with a newline
+  fi
   {
-    if [[ ! -s $file ]]; then
-      printf '# Settings for the generated CI and dependabot.yml. Every key:\n'
-      printf '# https://github.com/%s/blob/main/examples/repo-tools.conf\n' "$RT_SOURCE_REPO"
-    elif [[ -n $(tail -c1 "$file") ]]; then
-      echo # the file didn't end with a newline
-    fi
+    case $start in
+      header)
+        printf '# Settings for the generated CI and dependabot.yml. Every key:\n'
+        printf '# https://github.com/%s/blob/main/examples/repo-tools.conf\n' "$RT_SOURCE_REPO"
+        ;;
+      unterminated) echo ;;
+    esac
     printf '\n# Carried over from the hand-written %s when repo-tools replaced it.\n' "$source"
     while IFS= read -r c; do
       [[ -z $c || $c == *[[:cntrl:]]* ]] || printf '# %s\n' "$c"
