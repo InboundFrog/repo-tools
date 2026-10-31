@@ -172,6 +172,10 @@ rt_list_workflows() {
       val=$(rt_conf "${lang^^}_${kind^^}")
       [[ -z $val ]] || steps=$(sed -E "s#${kind}: [^|]*#${kind}: ${val//#/\\#} (override) #" <<<"$steps")
     done
+    # bats only runs when there are tests to run.
+    if [[ $lang == shell && -z $(rt_conf SHELL_TEST) && -z $(git -C "$dir" ls-files '*.bats') ]]; then
+      steps=${steps/test: bats/test: bats (skipped: no *.bats files)}
+    fi
     echo "    job $lang  (dirs: $dirs)"
     val=$(rt_conf "${lang^^}_APT_PACKAGES" "$(rt_conf APT_PACKAGES)")
     [[ -z $val ]] || echo "      apt: $val"

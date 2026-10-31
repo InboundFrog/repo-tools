@@ -296,6 +296,21 @@ assert_contains "dry run shows the diff" "+# $RT_MARKER" "$out"
 RT_DRY_RUN=0
 
 echo
+echo "Listing existing workflows next to the generated jobs"
+repo=$(new_repo)
+mk "$repo" run.sh 'echo'
+commit "$repo"
+RT_CONF=()
+out=$(rt_list_workflows "$repo" "$(rt_ci_plan "$repo")")
+assert_contains "no workflows yet" "  (none)" "$out"
+assert_contains "bats reported as skipped without *.bats files" "test: bats (skipped: no *.bats files)" "$out"
+mk "$repo" test/run.bats '@test "x" { true; }'
+commit "$repo"
+out=$(rt_list_workflows "$repo" "$(rt_ci_plan "$repo")")
+assert_contains "bats reported when *.bats files exist" "      test: bats" "$out"
+assert_not_contains "no skipped note with *.bats files" "skipped: no *.bats" "$out"
+
+echo
 echo "Renderer and reusable workflows agree on inputs"
 if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
   for lang in "${RT_LANGS[@]}"; do
