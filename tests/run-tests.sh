@@ -231,6 +231,7 @@ mk "$repo" "$RT_CONF_FILE" "APT_PACKAGES=libudev-dev, pkg-config
 PYTHON_APT_PACKAGES=libpq-dev
 RUST_VERSION=1.96
 RUST_AUDIT=skip
+RUST_MSRV=skip
 DEPENDABOT_IGNORE_CARGO=rand:minor+major windows-*
 DEPENDABOT_IGNORE_GITHUB_ACTIONS=actions/checkout:major
 "
@@ -244,6 +245,7 @@ assert_contains "global APT_PACKAGES, space separated" "apt-packages: 'libudev-d
 assert_contains "per-language APT_PACKAGES wins" "apt-packages: 'libpq-dev'" "$python_job"
 assert_contains "RUST_VERSION -> toolchain" "toolchain: '1.96'" "$rust_job"
 assert_contains "RUST_AUDIT -> audit-command" "audit-command: 'skip'" "$rust_job"
+assert_contains "RUST_MSRV -> msrv-command" "msrv-command: 'skip'" "$rust_job"
 assert_contains "ignore with update types" "- dependency-name: 'rand'
         update-types: ['version-update:semver-minor', 'version-update:semver-major']" "$dep"
 assert_contains "ignore without update types" "- dependency-name: 'windows-*'" "$dep"
@@ -475,6 +477,29 @@ PY
   if "$wrapped/rt-run" Test "$wrapped/pipe.sh" >/dev/null 2>&1; then rc=0; else rc=$?; fi
   assert_eq "pipefail, as with GitHub's bash" "1" "$rc"
 fi
+
+echo
+echo "Rust MSRV job"
+if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
+  python3 - "$ROOT/.github/workflows/rust.yml" >"$(rt_tmpdir)/read-msrv.sh" <<'PY'
+import sys, yaml
+steps = yaml.safe_load(open(sys.argv[1]))["jobs"]["msrv"]["steps"]
+print(next(s["run"] for s in steps if s.get("id") == "msrv"), end="")
+PY
+  read_msrv() { # CARGO_TOML_CONTENT -> the version output
+    local d
+    d=$(mktemp -d "$(rt_tmpdir)/msrv.XXXXXX")
+    printf '%s\n' "$1" >"$d/Cargo.toml"
+    (cd "$d" && GITHUB_OUTPUT="$d/out" bash -eo pipefail "$(rt_tmpdir)/read-msrv.sh" >/dev/null && cat "$d/out")
+  }
+  assert_eq "rust-version from [package]" "version=1.88" \
+    "$(read_msrv $'[package]\nname = "x"\nedition = "2021"\nrust-version = "1.88"\n\n[dependencies]\nrand = "0.9"')"
+  assert_eq "rust-version from [workspace.package]" "version=1.80.1" \
+    "$(read_msrv $'[workspace]\nmembers = ["a"]\n\n[workspace.package]\nrust-version = "1.80.1" # MSRV')"
+  assert_eq "no rust-version -> empty, job does nothing" "version=" "$(read_msrv $'[package]\nname = "x"')"
+fi
+out=$(RT_CONF=() && rt_list_workflows "$(new_repo)" "$(printf 'rust\t.\n')")
+assert_contains "compare lists the MSRV job" "msrv: cargo check --workspace on Cargo.toml rust-version" "$out"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

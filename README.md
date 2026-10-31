@@ -49,7 +49,7 @@ lives in this repo's [reusable workflows](.github/workflows):
 |---|---|---|---|---|
 | Python | `python.yml` | ruff (+ `ruff format` if configured) | pytest | `uv build` |
 | Node / TypeScript | `node.yml` | `lint`, `typecheck`, `format:check` scripts, or `tsc --noEmit` | `test` script | `build` script |
-| Rust | `rust.yml` | `cargo fmt`, `clippy -D warnings` | `cargo test` (incl. doc tests), plus a `cargo audit` job | `cargo build` |
+| Rust | `rust.yml` | `cargo fmt`, `clippy -D warnings` | `cargo test` (incl. doc tests), plus `cargo audit` and MSRV jobs | `cargo build` |
 | Java / Kotlin (Gradle) | `jvm.yml` | `gradlew check -x test` | `gradlew test` | `gradlew assemble` |
 | Java / Kotlin (Maven) | `jvm.yml` | none by default | `mvn test` | `mvn verify -DskipTests` |
 | Terraform | `terraform.yml` | `terraform fmt`, tflint | `terraform test` | `init -backend=false` + `validate` per directory |
@@ -67,7 +67,9 @@ libraries the build links against. Each one can also run on other runners
 (`OS=ubuntu-latest,macos-latest`), run an extra command after the standard steps
 (`RUST_EXTRA=ci/smoke.sh`), and upload build output as an artifact
 (`RUST_ARTIFACTS=target/release/mytool`). Rust builds use `--locked` when `Cargo.lock`
-is committed, and save their cache only from the default branch.
+is committed, and save their cache only from the default branch. A crate that
+declares `rust-version` is also checked (`cargo check`) on that toolchain;
+`RUST_MSRV=skip` turns that off.
 
 Actions in these workflows are pinned to commit SHAs (with the version in a
 comment), since they run in every repo. Dependabot updates the SHAs and comments.

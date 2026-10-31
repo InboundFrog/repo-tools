@@ -115,7 +115,7 @@ rt_compare_dependabot() {
 declare -gA RT_DEFAULT_STEPS=(
   [python]="lint: ruff check (+ ruff format --check if configured) | test: pytest | build: uv build"
   [node]="lint: lint/typecheck/format:check scripts | test: test script | build: build script"
-  [rust]="lint: cargo fmt --check, clippy --workspace --all-targets -D warnings | build: cargo build --workspace --all-targets | test: cargo test --workspace (incl. doc tests) | audit: cargo audit (separate job) | --locked when Cargo.lock is committed; cache saved from the default branch only"
+  [rust]="lint: cargo fmt --check, clippy --workspace --all-targets -D warnings | build: cargo build --workspace --all-targets | test: cargo test --workspace (incl. doc tests) | audit: cargo audit (separate job) | msrv: cargo check --workspace on Cargo.toml rust-version (separate job, if declared) | --locked when Cargo.lock is committed; cache saved from the default branch only"
   [gradle]="lint: gradlew check -x test | test: gradlew test | build: gradlew assemble"
   [maven]="lint: (none) | test: mvn test | build: mvn verify -DskipTests"
   [terraform]="lint: terraform fmt -check, tflint | build: init -backend=false + validate | test: terraform test"
@@ -168,7 +168,7 @@ rt_list_workflows() {
   while IFS=$'\t' read -r lang dirs; do
     [[ -n $lang ]] || continue
     steps=${RT_DEFAULT_STEPS[$lang]}
-    for kind in lint test build audit; do
+    for kind in lint test build audit msrv; do
       val=$(rt_conf "${lang^^}_${kind^^}")
       [[ -z $val ]] || steps=$(sed -E "s#${kind}: [^|]*#${kind}: ${val//#/\\#} (override) #" <<<"$steps")
     done

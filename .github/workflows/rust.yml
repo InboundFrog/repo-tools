@@ -6,6 +6,8 @@
 # Test:  cargo test (unit, integration and doc tests)
 # Audit: cargo audit against the RustSec advisory DB (separate job;
 #        honours .cargo/audit.toml)
+# MSRV:  cargo check --workspace on the rust-version declared in Cargo.toml
+#        (separate job; nothing to do if none is declared)
 # Cargo commands get --locked when Cargo.lock is committed. The build cache is
 # saved only from the default branch, so PR runs reuse it without churning it.
 #
@@ -54,6 +56,10 @@ on:
         default: ""
       audit-command:
         description: Replaces `cargo audit`; "skip" disables the audit job.
+        type: string
+        default: ""
+      msrv-command:
+        description: Replaces the MSRV check (run with RUSTUP_TOOLCHAIN set to the rust-version); "skip" disables the MSRV job.
         type: string
         default: ""
 
@@ -276,3 +282,96 @@ jobs:
           CMD: ${{ inputs.audit-command }}
         run: |
           if [[ -n $CMD ]]; then eval "$CMD"; else cargo audit; fi
+
+  msrv:
+    name: MSRV
+    if: inputs.msrv-command != 'skip'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up failure annotations
+        run: |
+          # Writes the rt-run step shell used below; see the comment inside it.
+          mkdir -p "$RUNNER_TEMP/rt-bin"
+          cat >"$RUNNER_TEMP/rt-bin/rt-run" <<'RT_EOF'
+          #!/usr/bin/env bash
+          # Step shell ("shell: rt-run TITLE {0}"): runs the step script the way GitHub's
+          # bash shell does and, if it fails, repeats the important part of its output
+          # as an error annotation, so the failure can be read through the checks API
+          # without downloading the log. Portable to bash 3.2 and BSD tools (macOS).
+          script=${!#}
+          title=${*:1:$#-1}
+          log=$(mktemp)
+          bash --noprofile --norc -eo pipefail "$script" 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            esc=$(printf '\033')
+            clean=$(sed -E "s/${esc}\[[0-9;]*[A-Za-z]//g" "$log" |
+              grep -v -E '^[[:space:]]*(Compiling|Checking|Downloaded|Downloading|Updating|Locking|Adding|Fresh|Blocking|Running|Finished|Installing|Installed|Resolved|Prepared|Audited) ' || true)
+            # Prefer everything from the first compiler-style diagnostic onwards,
+            # else the end of the output.
+            diag=$(printf '%s\n' "$clean" | sed -n -E '/^(error|warning)(\[|:)/,$p' | head -n 200)
+            body=${diag:-$(printf '%s\n' "$clean" | tail -n 100)}
+            body=$(printf '%s' "$body" | head -c 30000)
+            body=${body//'%'/'%25'}
+            body=${body//$'\r'/'%0D'}
+            body=${body//$'\n'/'%0A'}
+            echo "::error title=${title:-Step} failed (exit $status)::$body"
+          fi
+          rm -f "$log"
+          exit "$status"
+          RT_EOF
+          chmod +x "$RUNNER_TEMP/rt-bin/rt-run"
+          echo "$RUNNER_TEMP/rt-bin" >>"$GITHUB_PATH"
+
+      - name: Read rust-version
+        id: msrv
+        run: |
+          v=$(sed -n -E 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n1)
+          if [[ -z $v ]]; then echo "No rust-version in Cargo.toml; nothing to check"
+          else echo "rust-version: $v"
+          fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
+      - name: Install system packages
+        if: steps.msrv.outputs.version != '' && inputs.apt-packages != '' && runner.os == 'Linux'
+        env:
+          PACKAGES: ${{ inputs.apt-packages }}
+        run: |
+          read -ra pkgs <<<"$PACKAGES"
+          for p in "${pkgs[@]}"; do
+            [[ $p =~ ^[a-z0-9][a-z0-9.+:~=-]*$ ]] || { echo "::error::invalid package name: $p"; exit 1; }
+          done
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends "${pkgs[@]}"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        if: steps.msrv.outputs.version != ''
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          rust-src-dir: ${{ inputs.working-directory }}
+          # Not -D warnings (the action's default): older compilers warn about
+          # newer lints, and this job checks that the crate builds, not lints.
+          rustflags: ""
+          cache-save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: MSRV check
+        if: steps.msrv.outputs.version != ''
+        shell: rt-run MSRV check {0}
+        env:
+          CMD: ${{ inputs.msrv-command }}
+          # Beats rust-toolchain(.toml), so cargo really uses the MSRV.
+          RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
+        run: |
+          if [[ -n $CMD ]]; then eval "$CMD"; exit; fi
+          lock=()
+          [[ ! -f Cargo.lock ]] || lock=(--locked)
+          cargo check --workspace "${lock[@]}"
