@@ -18,6 +18,22 @@ on:
         description: Space-separated Ubuntu packages to install first (e.g. "libudev-dev pkg-config").
         type: string
         default: ""
+      runs-on:
+        description: Runner for the job (e.g. macos-latest). System packages are only installed on Linux.
+        type: string
+        default: ubuntu-latest
+      extra-command:
+        description: Runs after lint, test and build (e.g. "ci/smoke.sh"), in the working directory.
+        type: string
+        default: ""
+      artifact-paths:
+        description: Files, directories or globs to upload once the job passes, relative to the working directory. Space or newline separated.
+        type: string
+        default: ""
+      artifact-name:
+        description: Artifact name prefix; the runner OS and working directory are appended so matrix entries don't clash.
+        type: string
+        default: build
       python-version:
         type: string
         default: "3.13"
@@ -41,7 +57,7 @@ permissions:
 jobs:
   check:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 30
     defaults:
       run:
@@ -53,7 +69,7 @@ jobs:
           persist-credentials: false
 
       - name: Install system packages
-        if: inputs.apt-packages != ''
+        if: inputs.apt-packages != '' && runner.os == 'Linux'
         env:
           PACKAGES: ${{ inputs.apt-packages }}
         run: |
@@ -94,3 +110,39 @@ jobs:
         env:
           CMD: ${{ inputs.build-command }}
         run: eval "$CMD"
+
+      - name: Extra checks
+        if: inputs.extra-command != '' && inputs.extra-command != 'skip'
+        env:
+          CMD: ${{ inputs.extra-command }}
+        run: eval "$CMD"
+
+      - name: Prepare artifact
+        id: artifact
+        if: inputs.artifact-paths != ''
+        env:
+          PATHS: ${{ inputs.artifact-paths }}
+          NAME: ${{ inputs.artifact-name }}
+          WORKDIR: ${{ inputs.working-directory }}
+        run: |
+          # upload-artifact resolves paths from the workspace root, not the working directory.
+          dir=${WORKDIR#./}
+          dir=${dir%/}
+          [[ $dir != . ]] || dir=''
+          read -ra paths <<<"${PATHS//$'\n'/ }"
+          {
+            echo 'paths<<RT_EOF'
+            for p in "${paths[@]}"; do printf '%s%s\n' "${dir:+$dir/}" "$p"; done
+            echo 'RT_EOF'
+          } >>"$GITHUB_OUTPUT"
+          os=$(tr '[:upper:]' '[:lower:]' <<<"$RUNNER_OS")
+          name="${NAME:-build}-$os${dir:+-$dir}"
+          echo "name=${name//\//-}" >>"$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        if: steps.artifact.outputs.name != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.artifact.outputs.paths }}
+          if-no-files-found: error

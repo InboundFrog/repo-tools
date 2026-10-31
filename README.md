@@ -63,7 +63,10 @@ are linted; with nothing to test or build, those steps pass.
 Package managers and toolchain versions are picked up from the project (lockfiles,
 `.python-version`, `.nvmrc`, `.java-version`, `rust-toolchain.toml`, `.terraform-version`, ...).
 Every workflow can install Ubuntu packages first (`APT_PACKAGES`), for native
-libraries the build links against. Rust builds use `--locked` when `Cargo.lock`
+libraries the build links against. Each one can also run on other runners
+(`OS=ubuntu-latest,macos-latest`), run an extra command after the standard steps
+(`RUST_EXTRA=ci/smoke.sh`), and upload build output as an artifact
+(`RUST_ARTIFACTS=target/release/mytool`). Rust builds use `--locked` when `Cargo.lock`
 is committed, and save their cache only from the default branch.
 
 Actions in these workflows are pinned to commit SHAs (with the version in a
@@ -87,7 +90,10 @@ re-run `repo-ci` / `repo-dependabot`. See
 
 ```ini
 APT_PACKAGES=libudev-dev libusb-1.0-0-dev pkg-config
+OS=ubuntu-latest,macos-latest
 RUST_VERSION=1.96
+RUST_EXTRA=ci/smoke.sh
+RUST_ARTIFACTS=target/release/mytool
 DEPENDABOT_IGNORE_CARGO=rand:major+minor
 EXCLUDE=shell
 PYTHON_VERSION=3.12

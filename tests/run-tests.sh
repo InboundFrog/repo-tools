@@ -272,6 +272,66 @@ if rt_yaml_to_json "$repo/$RT_DEPENDABOT_FILE" >/dev/null 2>&1; then
 fi
 
 echo
+echo "Runner OS matrix, extra command and artifacts"
+repo=$(new_repo)
+mk "$repo" Cargo.toml '[package]'
+mk "$repo" Cargo.lock
+mk "$repo" tools/a.py 'print()'
+mk "$repo" "$RT_CONF_FILE" "OS=ubuntu-latest, macos-latest
+PYTHON_OS=ubuntu-latest
+RUST_EXTRA=ci/smoke.sh
+RUST_BUILD=cargo build --release --locked
+RUST_ARTIFACTS=target/release/tvmap, tvmap-out/
+"
+commit "$repo"
+rt_conf_load "$repo"
+ci=$(rt_render_ci "$repo" main)
+rust_job=$(sed -n '/^  rust:/,/^$/p' <<<"$ci")
+python_job=$(sed -n '/^  python:/,/^$/p' <<<"$ci")
+assert_contains "OS -> os matrix" "        os: ['ubuntu-latest', 'macos-latest']" "$rust_job"
+assert_contains "os matrix feeds runs-on" "      runs-on: \${{ matrix.os }}" "$rust_job"
+assert_contains "<LANG>_OS wins over OS" "        os: ['ubuntu-latest']" "$python_job"
+assert_contains "RUST_EXTRA -> extra-command" "extra-command: 'ci/smoke.sh'" "$rust_job"
+assert_contains "artifacts named after the language" "artifact-name: 'rust'" "$rust_job"
+assert_contains "artifact paths space separated" "artifact-paths: 'target/release/tvmap tvmap-out/'" "$rust_job"
+assert_not_contains "no artifacts unless configured" "artifact-" "$python_job"
+mkdir -p "$repo/.github/workflows" && printf '%s\n' "$ci" >"$repo/$RT_CI_FILE"
+validate_yaml "CI with OS matrix" "$repo/$RT_CI_FILE"
+if command -v actionlint >/dev/null; then
+  if out=$(cd "$repo" && actionlint "$RT_CI_FILE" 2>&1); then pass "CI with OS matrix passes actionlint"; else fail "CI with OS matrix passes actionlint" "$out"; fi
+fi
+out=$(rt_list_workflows "$repo" "$(rt_ci_plan "$repo")")
+assert_contains "compare lists the runners" "      os: ubuntu-latest macos-latest" "$out"
+assert_contains "compare lists the extra command" "      extra: ci/smoke.sh" "$out"
+assert_contains "compare lists artifacts" "      artifacts: target/release/tvmap tvmap-out/" "$out"
+RT_CONF=()
+assert_not_contains "no os matrix by default" "os:" "$(rt_render_ci "$repo" main)"
+
+# The "Prepare artifact" step is copied into every reusable workflow: check the
+# copies match, then run one.
+if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
+  scripts=$(python3 - "$ROOT"/.github/workflows/{python,node,rust,jvm,terraform,ansible,shell}.yml <<'PY'
+import sys, yaml
+runs = set()
+for f in sys.argv[1:]:
+    steps = yaml.safe_load(open(f))["jobs"]["check"]["steps"]
+    runs.update(s["run"] for s in steps if s.get("id") == "artifact")
+print(len(runs))
+print(next(iter(runs)), end="")
+PY
+  )
+  assert_eq "Prepare artifact step identical in every workflow" "1" "$(head -n1 <<<"$scripts")"
+  tail -n +2 <<<"$scripts" >"$(rt_tmpdir)/artifact.sh"
+  out=$(GITHUB_OUTPUT="$(rt_tmpdir)/artifact.out" RUNNER_OS=macOS NAME=rust WORKDIR=./tools/cli/ \
+    PATHS=$'target/release/x\ndist/*.tar.gz' bash -eo pipefail "$(rt_tmpdir)/artifact.sh" && cat "$(rt_tmpdir)/artifact.out")
+  assert_eq "artifact paths prefixed with the working directory; name made unique" \
+    "$(printf '%s\n' 'paths<<RT_EOF' tools/cli/target/release/x 'tools/cli/dist/*.tar.gz' RT_EOF name=rust-macos-tools-cli)" "$out"
+  out=$(GITHUB_OUTPUT="$(rt_tmpdir)/artifact2.out" RUNNER_OS=Linux NAME='' WORKDIR=. PATHS='a b' \
+    bash -eo pipefail "$(rt_tmpdir)/artifact.sh" && cat "$(rt_tmpdir)/artifact2.out")
+  assert_eq "artifact at the repo root" "$(printf '%s\n' 'paths<<RT_EOF' a b RT_EOF name=build-linux)" "$out"
+fi
+
+echo
 echo "Empty repo"
 repo=$(new_repo)
 mk "$repo" README.md '# hi'
@@ -335,7 +395,8 @@ echo "Renderer and reusable workflows agree on inputs"
 if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
   for lang in "${RT_LANGS[@]}"; do
     wf="$ROOT/.github/workflows/${RT_WORKFLOW[$lang]}"
-    want=(working-directory apt-packages lint-command test-command build-command)
+    want=(working-directory apt-packages lint-command test-command build-command
+      extra-command runs-on artifact-name artifact-paths)
     for pair in ${RT_INPUT_KEYS[$lang]:-}; do want+=("${pair#*:}"); done
     case $lang in gradle | maven) want+=(build-tool) ;; esac
     # PyYAML reads the bare `on:` key as boolean True.

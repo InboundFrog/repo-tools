@@ -177,6 +177,8 @@ rt_list_workflows() {
       steps=${steps/test: bats/test: bats (skipped: no *.bats files)}
     fi
     echo "    job $lang  (dirs: $dirs)"
+    val=$(rt_conf "${lang^^}_OS" "$(rt_conf OS)")
+    [[ -z $val ]] || echo "      os: $(rt_list "$val" | paste -sd' ' -)"
     val=$(rt_conf "${lang^^}_APT_PACKAGES" "$(rt_conf APT_PACKAGES)")
     [[ -z $val ]] || echo "      apt: $val"
     for pair in ${RT_INPUT_KEYS[$lang]:-}; do
@@ -184,6 +186,10 @@ rt_list_workflows() {
       val=$(rt_conf "${pair%%:*}")
       [[ -z $val ]] || echo "      ${pair#*:}: $val"
     done
+    val=$(rt_conf "${lang^^}_EXTRA")
+    [[ -z $val || $val == skip ]] || steps+=" | extra: $val"
+    val=$(rt_conf "${lang^^}_ARTIFACTS")
+    [[ -z $val ]] || steps+=" | artifacts: $(rt_list "$val" | paste -sd' ' -)"
     tr '|' '\n' <<<"$steps" | sed -E 's/^ +//; s/ +$//; s/^/      /'
   done <<<"$plan"
   echo "    job ci-ok \"$RT_CI_CHECK_NAME\"  (the check branch protection requires)"

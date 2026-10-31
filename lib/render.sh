@@ -13,8 +13,10 @@ declare -gA RT_WORKFLOW=(
 )
 
 # Language-specific config keys -> workflow inputs ("KEY:input KEY:input").
-# Every language also takes <LANG>_LINT/_TEST/_BUILD (-> *-command) and
-# APT_PACKAGES / <LANG>_APT_PACKAGES (-> apt-packages).
+# Every language also takes <LANG>_LINT/_TEST/_BUILD/_EXTRA (-> *-command),
+# <LANG>_ARTIFACTS (-> artifact-paths), and two keys with a global fallback:
+# APT_PACKAGES / <LANG>_APT_PACKAGES (-> apt-packages) and OS / <LANG>_OS
+# (-> a runs-on matrix).
 declare -gA RT_INPUT_KEYS=(
   [python]="PYTHON_VERSION:python-version"
   [node]="NODE_VERSION:node-version"
@@ -66,11 +68,16 @@ rt_ci_plan() {
   done
 }
 
+# Comma/space separated list -> single-quoted YAML flow sequence items.
+_rt_yq_list() {
+  local item out=''
+  while IFS= read -r item; do out+="${out:+, }$(_rt_yq "$item")"; done < <(rt_list "$1")
+  printf '%s\n' "$out"
+}
+
 _rt_render_job() { # LANG DIRS
-  local lang=$1 dirs=$2 matrix='' d pair key input val kind
-  while IFS= read -r d; do
-    matrix+="${matrix:+, }$(_rt_yq "$d")"
-  done < <(rt_list "$dirs")
+  local lang=$1 dirs=$2 os pair key input val kind
+  os=$(rt_conf "${lang^^}_OS" "$(rt_conf OS)")
 
   cat <<EOF
   ${lang}:
@@ -78,10 +85,13 @@ _rt_render_job() { # LANG DIRS
     strategy:
       fail-fast: false
       matrix:
-        dir: [${matrix}]
-    with:
-      working-directory: \${{ matrix.dir }}
+        dir: [$(_rt_yq_list "$dirs")]
 EOF
+  [[ -z $os ]] || printf '        os: [%s]\n' "$(_rt_yq_list "$os")"
+  # shellcheck disable=SC2016 # GitHub expressions, not shell
+  printf '    with:\n      working-directory: ${{ matrix.dir }}\n'
+  # shellcheck disable=SC2016
+  [[ -z $os ]] || printf '      runs-on: ${{ matrix.os }}\n'
   case $lang in gradle | maven) printf '      build-tool: %s\n' "$lang" ;; esac
 
   val=$(rt_conf "${lang^^}_APT_PACKAGES" "$(rt_conf APT_PACKAGES)")
@@ -92,10 +102,15 @@ EOF
     val=$(rt_conf "$key")
     [[ -z $val ]] || printf '      %s: %s\n' "$input" "$(_rt_yq "$val")"
   done
-  for kind in lint test build; do
+  for kind in lint test build extra; do
     val=$(rt_conf "${lang^^}_${kind^^}")
     [[ -n $val ]] && printf '      %s-command: %s\n' "$kind" "$(_rt_yq "$val")"
   done
+  val=$(rt_conf "${lang^^}_ARTIFACTS")
+  if [[ -n $val ]]; then
+    printf '      artifact-name: %s\n' "$(_rt_yq "$lang")"
+    printf '      artifact-paths: %s\n' "$(_rt_yq "$(rt_list "$val" | paste -sd' ' -)")"
+  fi
   return 0
 }
 
