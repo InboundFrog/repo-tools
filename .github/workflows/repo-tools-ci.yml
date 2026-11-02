@@ -1,6 +1,6 @@
-# CI for repo-tools itself. Hand-written (no "Managed by" marker), so running
-# bin/repo-ci against this repo leaves it alone. Exposes the same "CI OK"
-# check as generated workflows, so repo-protect works here too.
+# CI for repo-tools itself: lints the scripts with the shell reusable workflow
+# (dogfooding), runs actionlint and the offline tests, and ends in the same
+# "CI OK" job as the sample callers, so repo-protect works here too.
 name: CI
 
 on:

@@ -1,0 +1,62 @@
+# CI for this repo, via the reusable workflows in InboundFrog/repo-tools:
+# https://github.com/InboundFrog/repo-tools (examples/workflows has one of
+# these per language, and polyglot.yml for several). Copy it to
+# .github/workflows/ci.yml and edit the `with:` block; every input is listed in
+# that README. The commented lines are the inputs most often changed.
+#
+# The `uses:` line pins a release by commit SHA, with the tag in a comment, so
+# Dependabot (examples/dependabot.yml) proposes each newer release. Keep the
+# final "CI OK" job: it is the one check branch protection requires.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]   # the default branch
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Several directories: one matrix entry each.
+  python:
+    uses: InboundFrog/repo-tools/.github/workflows/python.yml@500e0a8474bc5f01dc50320aa0ec4bb5e680c498 # v0.0.1
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [services/api, tools/cli]
+    with:
+      working-directory: ${{ matrix.dir }}
+
+  # Several runners: system packages are only installed on Linux.
+  rust:
+    uses: InboundFrog/repo-tools/.github/workflows/rust.yml@500e0a8474bc5f01dc50320aa0ec4bb5e680c498 # v0.0.1
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    with:
+      working-directory: .
+      runs-on: ${{ matrix.os }}
+      apt-packages: libudev-dev pkg-config
+
+  shell:
+    uses: InboundFrog/repo-tools/.github/workflows/shell.yml@500e0a8474bc5f01dc50320aa0ec4bb5e680c498 # v0.0.1
+
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs: [python, rust, shell]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<<"$NEEDS" >/dev/null

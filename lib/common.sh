@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034 # constants are used by the scripts that source this
-# Shared helpers for repo-tools. Sourced by bin/* — not executable on its own.
+# Shared helpers for repo-tools. Sourced by bin/repo-protect and the tests — not
+# executable on its own.
 
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
   echo "repo-tools needs bash >= 4.4 (macOS: brew install bash)" >&2
@@ -9,23 +10,12 @@ fi
 
 # --- Settings (override via environment) -------------------------------------
 
-# Repo hosting the reusable workflows, and the ref callers pin to. Empty RT_REF
-# means the newest vX.Y.Z release tag, pinned by commit SHA (rt_resolve_ref),
-# so callers only move when Dependabot proposes the next release.
+# Repo hosting the reusable workflows. Callers pin its release tags, so
+# repo-protect guards those tags when run against it.
 RT_SOURCE_REPO="${RT_SOURCE_REPO:-InboundFrog/repo-tools}"
-RT_REF="${RT_REF:-}"
-RT_REF_COMMENT='' # the tag behind a SHA-pinned RT_REF, as "# vX.Y.Z" for Dependabot
-
-# Files carrying this marker are owned by repo-tools and may be overwritten.
-RT_MARKER="Managed by repo-tools"
-RT_CI_FILE=".github/workflows/repo-tools-ci.yml"
-RT_DEPENDABOT_FILE=".github/dependabot.yml"
-RT_CONF_FILE=".github/repo-tools.conf"
+# The job every caller ends with; the one check branch protection requires.
 RT_CI_CHECK_NAME="CI OK"
-
 RT_DRY_RUN="${RT_DRY_RUN:-0}"
-RT_FORCE="${RT_FORCE:-0}"
-RT_ACCEPT_LOSS="${RT_ACCEPT_LOSS:-0}" # --force may drop settings it can't carry over
 
 # --- Logging -----------------------------------------------------------------
 
@@ -44,69 +34,13 @@ die() {
   exit 1
 }
 
-# Both end up verbatim in the generated workflow's `uses:` line.
 [[ $RT_SOURCE_REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
   die "RT_SOURCE_REPO must look like owner/name (got: $RT_SOURCE_REPO)"
-[[ -z $RT_REF || ($RT_REF =~ ^[A-Za-z0-9_.][A-Za-z0-9_./-]*$ && $RT_REF != *..*) ]] ||
-  die "RT_REF must be a branch, tag or commit SHA (got: $RT_REF)"
-
-_rt_ls_tags() { git ls-remote --tags "https://github.com/$RT_SOURCE_REPO" 'v*'; }
-
-# rt_resolve_ref: if RT_REF is unset, sets it to the commit SHA of the newest
-# vX.Y.Z tag in RT_SOURCE_REPO, and RT_REF_COMMENT to that tag. Returns 1
-# (with a warning) if that can't be done. Call once, in the top-level shell,
-# before rendering a CI workflow.
-rt_resolve_ref() {
-  local refs tag sha
-  [[ -z $RT_REF ]] || return 0
-  if ! refs=$(_rt_ls_tags); then
-    warn "could not list release tags of $RT_SOURCE_REPO (set RT_REF to pin a ref yourself)"
-    return 1
-  fi
-  tag=$(sed -nE 's#^[0-9a-f]{40}[[:space:]]+refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$#\1#p' <<<"$refs" |
-    sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)
-  if [[ -z $tag ]]; then
-    warn "$RT_SOURCE_REPO has no vX.Y.Z release tag yet; tag one, or set RT_REF (e.g. RT_REF=main)"
-    return 1
-  fi
-  tag=v$tag
-  # An annotated tag's own object is listed too; the commit is the peeled "^{}" entry.
-  sha=$(awk -v t="refs/tags/$tag^{}" '$2 == t { print $1 }' <<<"$refs")
-  [[ -n $sha ]] || sha=$(awk -v t="refs/tags/$tag" '$2 == t { print $1 }' <<<"$refs")
-  RT_REF=$sha RT_REF_COMMENT=$tag
-}
 
 rt_require() {
   local c
   for c in "$@"; do
     command -v "$c" >/dev/null 2>&1 || die "missing required command: $c"
-  done
-}
-
-# --- Argument parsing ----------------------------------------------------------
-
-# Parses the flags shared by every per-repo command. Positional args end up
-# in RT_ARGS. Each script defines usage() before calling this.
-rt_parse_args() {
-  RT_ARGS=()
-  while (($#)); do
-    case $1 in
-      -n | --dry-run) RT_DRY_RUN=1 ;;
-      -f | --force) RT_FORCE=1 ;;
-      --accept-loss) RT_ACCEPT_LOSS=1 ;;
-      -h | --help)
-        usage
-        exit 0
-        ;;
-      --)
-        shift
-        RT_ARGS+=("$@")
-        break
-        ;;
-      -*) die "unknown option: $1 (see --help)" ;;
-      *) RT_ARGS+=("$1") ;;
-    esac
-    shift
   done
 }
 
@@ -139,6 +73,7 @@ rt_resolve_repo() {
 # Loads repo metadata into RT_REPO, RT_VISIBILITY, RT_DEFAULT_BRANCH,
 # RT_ARCHIVED and RT_PERMISSION.
 rt_load_repo() {
+  [[ -n ${1:-} ]] || die "empty repository name"
   local json
   json=$(gh repo view "$1" --json nameWithOwner,visibility,defaultBranchRef,isArchived,viewerPermission) ||
     die "cannot read repository $1"
@@ -208,135 +143,50 @@ rt_api() {
   fi
 }
 
-# --- Paths inside a target repo checkout -------------------------------------------
+# --- Reading workflow files --------------------------------------------------------
 
-# rt_path_inside DIR RELPATH
-# Succeeds if RELPATH stays inside DIR: relative, no ".." component, and no
-# existing component (the file itself included) is a symlink. Target repos are
-# untrusted input, and a committed symlink (".github -> /home/me") would
-# otherwise make repo-tools read, write or delete files outside the clone.
-rt_path_inside() {
-  local path=$1 part
-  local -a parts
-  [[ -n $2 && $2 != /* ]] || return 1
-  IFS=/ read -ra parts <<<"$2"
-  for part in "${parts[@]}"; do
-    [[ -n $part && $part != . ]] || continue
-    [[ $part != .. ]] || return 1
-    path+=/$part
-    [[ ! -L $path ]] || return 1
-  done
+# rt_yaml_to_json FILE -> JSON on stdout. Uses whichever YAML parser exists:
+# mikefarah yq, the jq-wrapper yq (python), or python3 + PyYAML; fails without
+# one, or when FILE doesn't parse. The file comes from a repo and its strings
+# end up on the terminal, so control characters are dropped from them. PyYAML
+# reads a workflow's bare `on:` key as boolean true; that key is renamed back.
+rt_yaml_to_json() {
+  local raw
+  if command -v yq >/dev/null 2>&1; then
+    if yq --version 2>&1 | grep -q mikefarah; then raw=$(yq -o=json '.' "$1"); else raw=$(yq '.' "$1"); fi
+  elif python3 -c 'import yaml' 2>/dev/null; then
+    raw=$(python3 -c 'import json, sys, yaml; json.dump(yaml.safe_load(open(sys.argv[1])), sys.stdout)' "$1")
+  else
+    return 2
+  fi || return 1
+  jq '(if type == "object" and has("true") then with_entries(.key |= if . == "true" then "on" else . end) else . end)
+    | walk(if type == "string" then gsub("[\u0000-\u0008\u000b-\u001f\u007f]"; "") else . end)' <<<"${raw:-null}"
 }
 
-# rt_is_managed FILE
-# Succeeds if FILE is a regular file whose first line carries RT_MARKER: one
-# repo-tools generated, and may overwrite. Only the first line counts, so a
-# hand-written file that merely mentions repo-tools in a comment is not ours.
-rt_is_managed() {
-  local first=''
-  [[ -f $1 && ! -L $1 ]] || return 1
-  { IFS= read -r first || [[ -n $first ]]; } <"$1" && [[ $first == *"$RT_MARKER"* ]]
-}
-
-# --- Per-repo config (.github/repo-tools.conf) --------------------------------------
-
-declare -gA RT_CONF=()
-
-# Parses KEY=VALUE lines (no shell evaluation — the file is data, not code).
-rt_conf_load() {
-  local file="$1/$RT_CONF_FILE" line key val
-  RT_CONF=()
-  rt_path_inside "$1" "$RT_CONF_FILE" || die "$RT_CONF_FILE (or a directory above it) is a symlink; refusing to read it"
-  [[ -f $file ]] || return 0
-  while IFS= read -r line || [[ -n $line ]]; do
-    line=${line%$'\r'}
-    [[ $line =~ ^[[:space:]]*([A-Z][A-Z0-9_]*)[[:space:]]*=(.*)$ ]] || continue
-    key=${BASH_REMATCH[1]}
-    val=${BASH_REMATCH[2]}
-    val=${val#"${val%%[![:space:]]*}"} # trim leading space
-    val=${val%"${val##*[![:space:]]}"} # trim trailing space
-    if [[ $val =~ ^\"(.*)\"$ || $val =~ ^\'(.*)\'$ ]]; then
-      val=${BASH_REMATCH[1]}
-    elif [[ $val =~ ^(.*[^[:space:]])[[:space:]]+#.*$ ]]; then
-      val=${BASH_REMATCH[1]} # unquoted: drop a trailing " # comment"
-    fi
-    # Control characters (e.g. terminal escape sequences) have no legitimate
-    # use here, and values are echoed to the terminal and into PRs.
-    if [[ $val == *[[:cntrl:]]* ]]; then
-      warn "$RT_CONF_FILE: $key contains control characters; ignoring it"
-      continue
-    fi
-    RT_CONF[$key]=$val
-  done <"$file"
-}
-
-# rt_conf KEY [DEFAULT]
-rt_conf() { printf '%s\n' "${RT_CONF[$1]:-${2:-}}"; }
-
-# rt_conf_append CLONE SOURCE COMMENTS  (KEY<TAB>VALUE lines on stdin)
-# Appends settings carried over from SOURCE (a file being replaced) to the
-# repo's repo-tools.conf, under a comment naming it and followed by COMMENTS
-# (one per line, the reasons the old file gave). Keys the conf already sets
-# are kept as they are. Prints each KEY=VALUE written; reload with
-# rt_conf_load afterwards.
-rt_conf_append() {
-  local dir=$1 source=$2 comments=$3 file="$1/$RT_CONF_FILE" key val c
-  local -a lines=()
-  while IFS=$'\t' read -r key val; do
-    [[ $key =~ ^[A-Z][A-Z0-9_]*$ && -n $val && $val != *[[:cntrl:]]* ]] || continue
-    if [[ -n ${RT_CONF[$key]+set} ]]; then
-      [[ ${RT_CONF[$key]} == "$val" ]] ||
-        warn "$RT_CONF_FILE already sets $key=${RT_CONF[$key]}; keeping it (the old $source had $val)"
-      continue
-    fi
-    lines+=("$key=$val")
-  done
-  ((${#lines[@]})) || return 0
-  rt_path_inside "$dir" "$RT_CONF_FILE" || die "$RT_CONF_FILE (or a directory above it) is a symlink; refusing to write it"
-  mkdir -p "$(dirname "$file")"
-  local start=newline
-  if [[ ! -s $file ]]; then
-    start=header
-  elif [[ -n $(tail -c1 "$file") ]]; then
-    start=unterminated # the file doesn't end with a newline
+# rt_workflow_lacks_permissions FILE
+# Succeeds if a workflow leaves at least one job on the repo's default token
+# permissions: no top-level `permissions:` and a job without its own. Such a
+# job gets read-only access once repo-protect makes that the default.
+rt_workflow_lacks_permissions() {
+  local json
+  if json=$(rt_yaml_to_json "$1" 2>/dev/null); then
+    jq -e 'type == "object" and (has("permissions") | not)
+      and ((.jobs // {}) | to_entries | any(.value | type != "object" or (has("permissions") | not)))' \
+      <<<"$json" >/dev/null
+  else
+    # No YAML parser: only a top-level block is recognised.
+    if grep -qE '^permissions:' "$1"; then return 1; fi
+    return 0
   fi
-  {
-    case $start in
-      header)
-        printf '# Settings for the generated CI and dependabot.yml. Every key:\n'
-        printf '# https://github.com/%s/blob/main/examples/repo-tools.conf\n' "$RT_SOURCE_REPO"
-        ;;
-      unterminated) echo ;;
-    esac
-    printf '\n# Carried over from the hand-written %s when repo-tools replaced it.\n' "$source"
-    while IFS= read -r c; do
-      [[ -z $c || $c == *[[:cntrl:]]* ]] || printf '# %s\n' "$c"
-    done <<<"$comments"
-    printf '%s\n' "${lines[@]}"
-  } >>"$file"
-  printf '%s\n' "${lines[@]}"
 }
 
-# "name<TAB>dir,dir" lines (a CI plan or ecosystem list) -> a Markdown list for
-# PR bodies. Directory names come from the target repo, so each is put in a
-# code span: a directory like "@org" must not mention (notify) anyone.
-rt_md_plan() {
-  local name dirs d out
-  while IFS=$'\t' read -r name dirs; do
-    [[ -n $name ]] || continue
-    out=''
-    while IFS= read -r d; do
-      d=${d//\`/\'}
-      out+="${out:+, }\`$d\`"
-    done < <(tr ',' '\n' <<<"$dirs")
-    # shellcheck disable=SC2016 # Markdown backticks
-    printf -- '- `%s`: %s\n' "$name" "$out"
-  done
-}
-
-# Splits a comma/space separated list into lines.
-rt_list() {
-  local -a parts
-  read -ra parts <<<"${1//,/ }"
-  ((${#parts[@]} == 0)) || printf '%s\n' "${parts[@]}"
+# rt_workflow_has_job FILE NAME
+# Succeeds if a job in the workflow reports its check under NAME (its `name:`).
+rt_workflow_has_job() {
+  local json
+  if json=$(rt_yaml_to_json "$1" 2>/dev/null); then
+    jq -e --arg n "$2" '(.jobs // {}) | objects | any(.[]; type == "object" and .name == $n)' <<<"$json" >/dev/null
+  else
+    grep -qE "^[[:space:]]+name:[[:space:]]*[\"']?$2[\"']?[[:space:]]*$" "$1"
+  fi
 }

@@ -1,4 +1,4 @@
-# Reusable Rust CI. Called by the repo-tools-ci.yml that bin/repo-ci generates.
+# Reusable Rust CI. Called from a repo's CI workflow (examples/workflows).
 #
 # Toolchain: the toolchain input, else rust-toolchain(.toml), else stable.
 # Lint:  cargo fmt --check, cargo clippy -D warnings

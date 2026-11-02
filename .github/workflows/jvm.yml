@@ -1,5 +1,5 @@
-# Reusable Java / Kotlin CI (Gradle or Maven). Called by the repo-tools-ci.yml
-# that bin/repo-ci generates.
+# Reusable Java / Kotlin CI (Gradle or Maven). Called from a repo's CI
+# workflow (examples/workflows).
 #
 #          Gradle (needs ./gradlew)        Maven (./mvnw if present, else mvn)
 # Lint:    ./gradlew check -x test          (none by default; plugins bound to

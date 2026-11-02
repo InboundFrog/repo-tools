@@ -1,4 +1,4 @@
-# Reusable Node.js / TypeScript CI. Called by the repo-tools-ci.yml that bin/repo-ci generates.
+# Reusable Node.js / TypeScript CI. Called from a repo's CI workflow (examples/workflows).
 #
 # Package manager from the lockfile: pnpm-lock.yaml -> pnpm, yarn.lock -> yarn, else npm.
 # Lint:  runs whichever of the lint, typecheck, type-check and format:check scripts
