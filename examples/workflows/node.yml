@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   node:
-    uses: InboundFrog/repo-tools/.github/workflows/node.yml@500e0a8474bc5f01dc50320aa0ec4bb5e680c498 # v0.0.1
+    uses: InboundFrog/repo-tools/.github/workflows/node.yml@bf24833e55abb4f21a6061c41f045efb4963181d # v0.1.0
     with:
       working-directory: .
       # node-version: "22"           # else .nvmrc / .node-version, else the latest LTS

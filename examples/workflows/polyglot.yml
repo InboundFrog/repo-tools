@@ -25,7 +25,7 @@ concurrency:
 jobs:
   # Several directories: one matrix entry each.
   python:
-    uses: InboundFrog/repo-tools/.github/workflows/python.yml@500e0a8474bc5f01dc50320aa0ec4bb5e680c498 # v0.0.1
+    uses: InboundFrog/repo-tools/.github/workflows/python.yml@bf24833e55abb4f21a6061c41f045efb4963181d # v0.1.0
     strategy:
       fail-fast: false
       matrix:
@@ -35,7 +35,7 @@ jobs:
 
   # Several runners: system packages are only installed on Linux.
   rust:
-    uses: InboundFrog/repo-tools/.github/workflows/rust.yml@500e0a8474bc5f01dc50320aa0ec4bb5e680c498 # v0.0.1
+    uses: InboundFrog/repo-tools/.github/workflows/rust.yml@bf24833e55abb4f21a6061c41f045efb4963181d # v0.1.0
     strategy:
       fail-fast: false
       matrix:
@@ -46,7 +46,7 @@ jobs:
       apt-packages: libudev-dev pkg-config
 
   shell:
-    uses: InboundFrog/repo-tools/.github/workflows/shell.yml@500e0a8474bc5f01dc50320aa0ec4bb5e680c498 # v0.0.1
+    uses: InboundFrog/repo-tools/.github/workflows/shell.yml@bf24833e55abb4f21a6061c41f045efb4963181d # v0.1.0
 
   ci-ok:
     name: CI OK
