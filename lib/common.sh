@@ -228,6 +228,16 @@ rt_path_inside() {
   done
 }
 
+# rt_is_managed FILE
+# Succeeds if FILE is a regular file whose first line carries RT_MARKER: one
+# repo-tools generated, and may overwrite. Only the first line counts, so a
+# hand-written file that merely mentions repo-tools in a comment is not ours.
+rt_is_managed() {
+  local first=''
+  [[ -f $1 && ! -L $1 ]] || return 1
+  { IFS= read -r first || [[ -n $first ]]; } <"$1" && [[ $first == *"$RT_MARKER"* ]]
+}
+
 # --- Per-repo config (.github/repo-tools.conf) --------------------------------------
 
 declare -gA RT_CONF=()

@@ -3,10 +3,12 @@
 # Cloning target repos and publishing managed files as pull requests.
 
 # rt_clone REPO -> prints path of a fresh shallow clone of the default branch.
+# The clone is untrusted input: LFS smudging is off, as a committed .lfsconfig
+# could send git-lfs to any server (repo-tools never needs LFS content).
 rt_clone() {
   local dest
   dest=$(mktemp -d "$(rt_tmpdir)/$(tr '/' '_' <<<"$1").XXXXXX")
-  gh repo clone "$1" "$dest" -- --depth 1 --quiet --no-tags >&2 || die "failed to clone $1"
+  GIT_LFS_SKIP_SMUDGE=1 gh repo clone "$1" "$dest" -- --depth 1 --quiet --no-tags >&2 || die "failed to clone $1"
   printf '%s\n' "$dest"
 }
 
@@ -24,7 +26,7 @@ rt_write_managed() {
     warn "$2 exists and isn't a regular file; leaving it alone"
     return 1
   fi
-  if [[ -f $dest ]] && ! grep -qF "$RT_MARKER" "$dest"; then
+  if [[ -f $dest ]] && ! rt_is_managed "$dest"; then
     if ((RT_FORCE)); then
       warn "$2 exists and isn't managed by repo-tools; replacing it (--force)"
     else
@@ -36,15 +38,22 @@ rt_write_managed() {
   printf '%s\n' "$content" >"$dest"
 }
 
+# Parent SHAs of a commit, one per line, read from the object itself: after a
+# shallow fetch, rev-list and log report the commit as having none.
+_rt_parents() { git -C "$1" cat-file -p "$2" | sed -n '/^$/q; s/^parent //p'; }
+
 # rt_publish_pr CLONE BRANCH TITLE BODY PATH...
 # Commits PATHs to BRANCH and opens (or refreshes) a PR against the default
-# branch. Does nothing if the default branch, or the open PR branch, already
-# has identical content — so re-running is cheap and doesn't spam CI.
+# branch. Does nothing if the default branch already has identical content, or
+# the open PR branch is exactly the commit repo-tools would push — so
+# re-running is cheap and doesn't spam CI.
 #
-# "Identical" means the whole tree, not just PATHs: anything else someone
-# pushed to BRANCH (which the PR would then quietly carry) is overwritten.
-# Only same-repo PRs count as ours; a fork can open a PR from a branch with
-# the same name, and must not be reported as the repo-tools PR.
+# "Exactly" means one commit on the default branch tip whose whole tree, not
+# just PATHs, equals ours. Anything else on BRANCH — an extra file, or a
+# history that merely ends in the right tree — is overwritten, so nothing can
+# ride along in a repo-tools PR. Only same-repo PRs count as ours; a fork can
+# open a PR from a branch with the same name, and must not be reported as the
+# repo-tools PR.
 rt_publish_pr() {
   local dir=$1 branch=$2 title=$3 body=$4 url
   shift 4
@@ -64,6 +73,7 @@ rt_publish_pr() {
   fi
 
   if "${g[@]}" fetch --quiet --depth 1 origin "refs/heads/$branch" 2>/dev/null &&
+    [[ $(_rt_parents "$dir" FETCH_HEAD) == "$("${g[@]}" rev-parse HEAD)" ]] &&
     "${g[@]}" diff --cached --quiet FETCH_HEAD; then
     ok "branch '$branch' already has these changes"
   else
@@ -98,7 +108,7 @@ rt_replace_workflows() {
     path=.github/workflows/$wf
     if ! rt_path_inside "$dir" "$path"; then
       warn "REPLACE_WORKFLOWS: $path (or a directory above it) is a symlink; not removing it"
-    elif [[ $path == "$RT_CI_FILE" ]] || { [[ -f $dir/$path ]] && grep -qF "$RT_MARKER" "$dir/$path"; }; then
+    elif [[ $path == "$RT_CI_FILE" ]] || rt_is_managed "$dir/$path"; then
       warn "REPLACE_WORKFLOWS: $path is managed by repo-tools; not removing it"
     elif [[ -f $dir/$path ]]; then
       rm -- "$dir/$path"

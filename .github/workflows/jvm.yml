@@ -137,7 +137,7 @@ jobs:
           if [[ -n $REQUESTED ]]; then v=$REQUESTED
           elif [[ -f .java-version ]]; then v=$(head -n1 .java-version)
           elif [[ -f .sdkmanrc ]] && grep -q '^java=' .sdkmanrc; then
-            v=$(sed -nE 's/^java=([0-9]+).*/\1/p' .sdkmanrc)
+            v=$(sed -nE 's/^java=([0-9]+).*/\1/p' .sdkmanrc | head -n1)
           else v=21
           fi
           if [[ $TOOL == gradle ]]; then

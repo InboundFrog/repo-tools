@@ -114,7 +114,8 @@ languages a repo uses.
 
 ## Per-repo customisation
 
-Generated files carry a `Managed by repo-tools` header and get overwritten.
+Generated files carry a `Managed by repo-tools` header on their first line and
+get overwritten.
 Put overrides in `.github/repo-tools.conf` in the target repo instead, then
 re-run `repo-ci` / `repo-dependabot`. See
 [`examples/repo-tools.conf`](examples/repo-tools.conf) for every key. For example:
@@ -181,6 +182,12 @@ but can't push directly to the default branch. Tune this with environment variab
 | `RT_BYPASS` | `pull_request` | Admin bypass: `pull_request`, `always` or `none` |
 | `RT_CODEQL` | `1` | Enable CodeQL default setup on public repos (`0` to skip) |
 
+On the repo hosting the reusable workflows (`RT_SOURCE_REPO`, this one by
+default) it adds a second ruleset, `repo-tools: release tags`: only repo admins
+can create, move or delete `v*` tags. Callers pin the commit behind the newest
+`vX.Y.Z` tag, so a tag there is a release, and write access alone must not be
+enough to cut one.
+
 CodeQL default setup needs no workflow file: GitHub picks the languages and keeps
 the queries current. A repo that already runs its own CodeQL workflow (advanced
 setup) keeps it; `repo-protect` warns and moves on. Delete that workflow first if
@@ -206,22 +213,28 @@ Private repos still get Dependabot, CI and delete-branch-on-merge, but CI isn't
 - **Target repos are untrusted input.** Their files and `.github/repo-tools.conf`
   are read as data: config values are never evaluated by the scripts, and
   repo-tools refuses to read, write or delete through a symlink in a target
-  repo (`.github` itself included), even with `--force`.
+  repo (`.github` itself included), even with `--force`. Strings read from a
+  repo's YAML lose their control characters before they reach the terminal or
+  a PR description, and clones skip Git LFS, so a committed `.lfsconfig` can't
+  point git-lfs at another server.
 - **No `${{ }}` in config.** Values end up in the generated workflow, where
   GitHub would evaluate expressions before the reusable workflow runs them as
   commands. Use environment variables (`$GITHUB_HEAD_REF`, ...) in commands instead.
-- **Branches and PRs.** `repo-tools/*` branches are force-pushed whenever their
-  tree differs from what repo-tools would commit, so nothing else can ride along
-  in a repo-tools PR. PRs from forks are never mistaken for the repo-tools PR.
+- **Branches and PRs.** `repo-tools/*` branches are force-pushed unless they hold
+  exactly the commit repo-tools would make: one commit on the default branch
+  tip, with the same tree. So nothing else can ride along in a repo-tools PR,
+  not even in its history. PRs from forks are never mistaken for the repo-tools PR.
 - **Releases are the trust boundary.** Callers run a pinned commit and move
   only through a Dependabot PR, so a bad merge here stays here until it's
-  tagged. Keep this repo's default branch protected
-  (`bin/repo-protect InboundFrog/repo-tools`), and look at what changed since
-  the last tag before releasing. `RT_REF=main` gives up that boundary for the
-  repos it's used on.
+  tagged. Run `bin/repo-protect InboundFrog/repo-tools` here: it protects the
+  default branch and makes `v*` tags admin-only, so write access alone can't
+  cut a release. Look at what changed since the last tag before releasing.
+  `RT_REF=main` gives up that boundary for the repos it's used on.
 - **CI checks are not a security gate.** `pull_request` runs use the PR's own
-  copy of the workflow, so `CI OK` guards against mistakes, not against someone
-  with write access. Use `RT_APPROVALS` (and CODEOWNERS) for that.
+  copy of the workflow, a fork's PR included, so a PR can swap in a workflow
+  whose `CI OK` always passes. `CI OK` guards against mistakes, not against
+  whoever opened the PR; a human review does, so set `RT_APPROVALS` (and
+  CODEOWNERS) where that matters.
 
 ## Development
 

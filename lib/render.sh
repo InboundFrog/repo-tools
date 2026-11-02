@@ -121,13 +121,13 @@ EOF
 # Refuse instead; commands can read the same data from the environment
 # (e.g. $GITHUB_HEAD_REF), which isn't re-parsed as code.
 # shellcheck disable=SC2016 # '${{' is a literal GitHub expression opener, not shell
-_rt_check_no_expressions() { # PLAN
+_rt_check_no_expressions() { # PLAN BRANCH
   local key
   for key in "${!RT_CONF[@]}"; do
     [[ $key == DEPENDABOT_* || ${RT_CONF[$key]} != *'${{'* ]] ||
       die "$RT_CONF_FILE: $key contains a \${{ }} expression; use environment variables (e.g. \$GITHUB_HEAD_REF) instead"
   done
-  [[ $1 != *'${{'* ]] || die "a directory name contains '\${{'; refusing to put it in the workflow"
+  [[ "$*" != *'${{'* ]] || die "a directory or branch name contains '\${{'; refusing to put it in the workflow"
 }
 
 # rt_render_ci DIR DEFAULT_BRANCH  (RT_REF must be resolved first: rt_resolve_ref)
@@ -135,7 +135,7 @@ rt_render_ci() {
   local dir=$1 branch=$2 plan lang dirs needs=()
   [[ -n $RT_REF ]] || die "RT_REF isn't set (call rt_resolve_ref first)"
   plan=$(rt_ci_plan "$dir")
-  _rt_check_no_expressions "$plan"
+  _rt_check_no_expressions "$plan" "$branch"
 
   cat <<EOF
 # ${RT_MARKER} (bin/repo-ci). Local edits will be overwritten.
