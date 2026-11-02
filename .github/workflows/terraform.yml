@@ -1,4 +1,4 @@
-# Reusable Terraform CI. Called by the repo-tools-ci.yml that bin/repo-ci generates.
+# Reusable Terraform CI. Called from a repo's CI workflow (examples/workflows).
 #
 # Lint:  terraform fmt -check, plus tflint (uses .tflint.hcl if present)
 # Build: init -backend=false + validate in every directory containing .tf files

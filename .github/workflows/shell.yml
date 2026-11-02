@@ -1,5 +1,5 @@
-# Reusable shell script CI. Called by the repo-tools-ci.yml that bin/repo-ci
-# generates (repo-tools also uses it on itself).
+# Reusable shell script CI. Called from a repo's CI workflow (examples/workflows).
+# repo-tools also uses it on itself.
 #
 # Lint:  shellcheck on tracked *.sh / *.bash files and extensionless scripts
 #        with a sh/bash shebang (honours .shellcheckrc)

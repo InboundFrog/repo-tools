@@ -1,4 +1,4 @@
-# Reusable Ansible CI. Called by the repo-tools-ci.yml that bin/repo-ci generates.
+# Reusable Ansible CI. Called from a repo's CI workflow (examples/workflows).
 #
 # Lint:  ansible-lint (honours .ansible-lint; installs collections from
 #        requirements.yml itself, and includes yamllint + syntax checks)

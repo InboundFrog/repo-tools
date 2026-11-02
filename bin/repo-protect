@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Protect the default branch with a ruleset, and enable free security features.
+# Put the same security baseline on one repo, many, or every repo you own.
 set -euo pipefail
 
 RT_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 # shellcheck source=lib/common.sh
 source "$RT_ROOT/lib/common.sh"
-# shellcheck source=lib/compare.sh
-source "$RT_ROOT/lib/compare.sh"
 
 RT_RULESET_NAME="repo-tools: default branch"
 RT_TAG_RULESET_NAME="repo-tools: release tags"
@@ -18,10 +16,13 @@ GITHUB_ACTIONS_APP_ID=15368 # pins the required check to GitHub Actions
 REPO_ADMIN_ROLE_ID=5
 
 usage() {
-  cat <<EOF
-Usage: $(basename "$0") [options] REPO...
+  cat <<USAGE
+Usage: $(basename "$0") [options] [REPO...]
+
+Idempotent: re-running only changes what is out of date.
 
 All repos:
+  - Dependabot alerts and security updates
   - delete head branches after merge
   - GitHub Actions: workflows get a read-only GITHUB_TOKEN unless they declare
     more in \`permissions:\`, and can't create or approve pull requests
@@ -31,12 +32,16 @@ Public repos (or private with --include-private, which needs a paid plan):
     CodeQL code scanning "default setup" (public only; a repo already running
     its own CodeQL workflow is left alone)
   - ruleset "$RT_RULESET_NAME" on the default branch: no deletion or force
-    push, changes via PR only, and "$RT_CI_CHECK_NAME" must pass once
-    $RT_CI_FILE is on the default branch (re-run after merging the CI PR)
+    push, changes via PR only, and "$RT_CI_CHECK_NAME" must pass once a
+    workflow on the default branch has a job of that name (examples/workflows)
   - on $RT_SOURCE_REPO itself, ruleset "$RT_TAG_RULESET_NAME": only admins can
     create, move or delete vX.Y.Z tags, the releases callers are pinned to
 
-REPO is "owner/name", or "name" for repos you own.
+Repo selection (combine freely):
+  REPO...                 "owner/name", or "name" for repos you own
+      --all               every non-archived, non-fork repo you own
+      --public            with --all: only public repos
+      --file FILE         repos listed in FILE, one per line (# comments allowed)
 
 Options:
   -n, --dry-run           Show what would change without changing anything
@@ -48,7 +53,7 @@ Environment:
   RT_BYPASS     Admin bypass: pull_request (default; can override failing checks on
                 a PR, but can't push directly), always, or none
   RT_CODEQL     1 (default) enables CodeQL default setup on public repos; 0 skips it
-EOF
+USAGE
 }
 
 ruleset_json() { # REQUIRE_CHECK(true|false)
@@ -85,9 +90,9 @@ ruleset_json() { # REQUIRE_CHECK(true|false)
     }'
 }
 
-# Release tags on the repo hosting the reusable workflows. rt_resolve_ref pins
-# callers to the newest vX.Y.Z tag, so whoever can push one ships code to every
-# repo: only admins may create, move or delete them.
+# Release tags on the repo hosting the reusable workflows. Callers pin the
+# newest vX.Y.Z tag, so whoever can push one ships code to every repo: only
+# admins may create, move or delete them.
 tag_ruleset_json() {
   jq -n --arg name "$RT_TAG_RULESET_NAME" --argjson admin_role "$REPO_ADMIN_ROLE_ID" '{
     name: $name,
@@ -128,20 +133,21 @@ enable_codeql() {
   fi
 }
 
-# Lists default-branch workflows that rely on the repo's default token
-# permissions, which restrict_actions_token is about to make read-only.
-warn_workflows_without_permissions() {
+# Reads every workflow on the default branch once. Sets WF_NO_PERMISSIONS to
+# the ones that leave a job on the repo's default token permissions (which
+# restrict_actions_token is about to make read-only), and WF_HAS_CI_OK when one
+# has the job the ruleset requires.
+scan_workflows() {
   local ref name file
+  WF_NO_PERMISSIONS=() WF_HAS_CI_OK=false
   file="$(rt_tmpdir)/workflow.yml"
   ref=$(jq -rn --arg b "$RT_DEFAULT_BRANCH" '$b | @uri')
   while IFS= read -r name; do
     gh api -H "Accept: application/vnd.github.raw+json" \
       "repos/$RT_REPO/contents/.github/workflows/$(jq -rn --arg n "$name" '$n | @uri')?ref=$ref" \
       >"$file" 2>/dev/null || continue
-    if rt_workflow_lacks_permissions "$file"; then
-      warn "$name doesn't declare \`permissions:\` for every job, so it gets the default token: read-only from now on."
-      warn "  If it needs to write (push, releases, PR comments...), declare it there, e.g. \`permissions: { contents: write }\`."
-    fi
+    if rt_workflow_lacks_permissions "$file"; then WF_NO_PERMISSIONS+=("$name"); fi
+    if rt_workflow_has_job "$file" "$RT_CI_CHECK_NAME"; then WF_HAS_CI_OK=true; fi
   done < <(gh api "repos/$RT_REPO/contents/.github/workflows?ref=$ref" \
     --jq '.[] | select(.type == "file" and (.name | test("\\.ya?ml$"))) | .name' 2>/dev/null || true)
 }
@@ -149,14 +155,17 @@ warn_workflows_without_permissions() {
 # Default GITHUB_TOKEN to read-only, and stop workflows creating/approving
 # PRs (an approval from the token could satisfy a required review).
 restrict_actions_token() {
-  local current want='{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": false}'
+  local current name want='{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": false}'
   current=$(gh api "repos/$RT_REPO/actions/permissions/workflow" 2>/dev/null) || current='null'
   if jq -e '.default_workflow_permissions == "read" and .can_approve_pull_request_reviews == false' \
     <<<"$current" >/dev/null 2>&1; then
     ok "Actions token already read-only by default; workflows can't approve PRs"
     return 0
   fi
-  warn_workflows_without_permissions
+  for name in "${WF_NO_PERMISSIONS[@]+"${WF_NO_PERMISSIONS[@]}"}"; do
+    warn "$name doesn't declare \`permissions:\` for every job, so it gets the default token: read-only from now on."
+    warn "  If it needs to write (push, releases, PR comments...), declare it there, e.g. \`permissions: { contents: write }\`."
+  done
   if rt_api PUT "repos/$RT_REPO/actions/permissions/workflow" "$want"; then
     rt_done "Actions token read-only by default; workflows can't create or approve PRs"
   else
@@ -165,10 +174,17 @@ restrict_actions_token() {
 }
 
 process() {
-  local id require_check=false
+  local repo require_check=false
   log "Protect: $1"
-  rt_load_repo "$(rt_resolve_repo "$1")"
+  repo=$(rt_resolve_repo "$1") # an assignment, so a refused name stops here under set -e
+  rt_load_repo "$repo"
   rt_check_repo_usable
+  scan_workflows
+
+  rt_api PUT "repos/$RT_REPO/vulnerability-alerts"
+  rt_done "Dependabot alerts enabled"
+  rt_api PUT "repos/$RT_REPO/automated-security-fixes"
+  rt_done "Dependabot security updates enabled"
 
   rt_api PATCH "repos/$RT_REPO" '{"delete_branch_on_merge": true}'
   # Read it back: the setting is easy to miss in the UI, and only affects PRs
@@ -202,28 +218,45 @@ process() {
     return 0
   fi
 
-  if gh api "repos/$RT_REPO/contents/$RT_CI_FILE?ref=$(jq -rn --arg b "$RT_DEFAULT_BRANCH" '$b | @uri')" \
-    --silent 2>/dev/null; then
+  if [[ $WF_HAS_CI_OK == true ]]; then
     require_check=true
   else
-    warn "$RT_CI_FILE isn't on $RT_DEFAULT_BRANCH yet, so '$RT_CI_CHECK_NAME' won't be required."
-    warn "Merge the repo-ci PR, then re-run repo-protect."
+    warn "no workflow on $RT_DEFAULT_BRANCH has a '$RT_CI_CHECK_NAME' job, so it won't be required."
+    warn "Add a caller from examples/workflows (see the README), merge it, then re-run repo-protect."
   fi
-
   upsert_ruleset "$RT_RULESET_NAME" "$(ruleset_json "$require_check")" "required check: $require_check"
   if [[ ${RT_REPO,,} == "${RT_SOURCE_REPO,,}" ]]; then
     upsert_ruleset "$RT_TAG_RULESET_NAME" "$(tag_ruleset_json)"
   fi
 }
 
-args=()
-for arg in "$@"; do
-  case $arg in
+repos=() all=0 public=0
+while (($#)); do
+  case $1 in
+    --all) all=1 ;;
+    --public) public=1 ;;
+    --file)
+      [[ -r ${2:-} ]] || die "--file needs a readable file"
+      mapfile -t -O "${#repos[@]}" repos < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$2")
+      shift
+      ;;
     --include-private) RT_INCLUDE_PRIVATE=1 ;;
-    *) args+=("$arg") ;;
+    -n | --dry-run) RT_DRY_RUN=1 ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      repos+=("$@")
+      break
+      ;;
+    -*) die "unknown option: $1 (see --help)" ;;
+    *) repos+=("$1") ;;
   esac
+  shift
 done
-rt_parse_args "${args[@]+"${args[@]}"}"
+
 rt_require gh jq
 [[ $RT_APPROVALS =~ ^[0-9]+$ ]] || die "RT_APPROVALS must be a number"
 [[ $RT_CODEQL == [01] ]] || die "RT_CODEQL must be 0 or 1"
@@ -231,4 +264,10 @@ case $RT_BYPASS in pull_request | always | none) ;; *) die "RT_BYPASS must be pu
 if ((RT_APPROVALS > 0)) && [[ $RT_BYPASS == none ]]; then
   warn "RT_APPROVALS=$RT_APPROVALS with no bypass: you won't be able to merge your own PRs alone"
 fi
-rt_for_each_repo process "${RT_ARGS[@]+"${RT_ARGS[@]}"}"
+
+if ((all)); then
+  list_args=(--limit 1000 --no-archived --source --json nameWithOwner --jq '.[].nameWithOwner')
+  ((public)) && list_args+=(--visibility public)
+  mapfile -t -O "${#repos[@]}" repos < <(gh repo list "$(rt_owner)" "${list_args[@]}")
+fi
+rt_for_each_repo process "${repos[@]+"${repos[@]}"}"

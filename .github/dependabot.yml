@@ -1,5 +1,5 @@
-# Managed by repo-tools (bin/repo-dependabot). Local edits will be overwritten.
-# Customise via .github/repo-tools.conf instead: https://github.com/InboundFrog/repo-tools
+# Dependabot for repo-tools itself. The github-actions entry keeps the actions
+# in the reusable workflows current; those bumps ship in the next release.
 version: 2
 updates:
   - package-ecosystem: github-actions

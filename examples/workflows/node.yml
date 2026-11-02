@@ -1,0 +1,46 @@
+# CI for this repo, via the reusable workflows in InboundFrog/repo-tools:
+# https://github.com/InboundFrog/repo-tools (examples/workflows has one of
+# these per language, and polyglot.yml for several). Copy it to
+# .github/workflows/ci.yml and edit the `with:` block; every input is listed in
+# that README. The commented lines are the inputs most often changed.
+#
+# The `uses:` line pins a release by commit SHA, with the tag in a comment, so
+# Dependabot (examples/dependabot.yml) proposes each newer release. Keep the
+# final "CI OK" job: it is the one check branch protection requires.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]   # the default branch
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    uses: InboundFrog/repo-tools/.github/workflows/node.yml@500e0a8474bc5f01dc50320aa0ec4bb5e680c498 # v0.0.1
+    with:
+      working-directory: .
+      # node-version: "22"           # else .nvmrc / .node-version, else the latest LTS
+      # lint-command: npm run lint   # default: the lint, typecheck and format:check scripts
+      # test-command: npm test       # default: the test script
+      # build-command: skip          # default: the build script
+
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs: [node]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<<"$NEEDS" >/dev/null

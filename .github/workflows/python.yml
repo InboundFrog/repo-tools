@@ -1,4 +1,4 @@
-# Reusable Python CI. Called by the repo-tools-ci.yml that bin/repo-ci generates.
+# Reusable Python CI. Called from a repo's CI workflow (examples/workflows).
 #
 # Install: uv.lock -> uv sync; poetry.lock -> poetry install; otherwise a venv
 #          with the project (+ dev/test extras) and any requirements*.txt.
