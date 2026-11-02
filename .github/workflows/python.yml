@@ -170,7 +170,9 @@ jobs:
             skip) echo "Lint skipped"; exit 0 ;;
             ?*) eval "$CMD"; exit ;;
           esac
-          ruff() { if command -v ruff >/dev/null; then command ruff "$@"; else uvx "ruff@$RT_RUFF_VERSION" "$@"; fi; }
+          # A ruff from the project's dependencies wins; else the pinned release via uvx.
+          # Decide before defining the fallback: `command -v` would find the function itself.
+          if ! command -v ruff >/dev/null; then ruff() { uvx "ruff@$RT_RUFF_VERSION" "$@"; }; fi
           ruff check --output-format=github .
           if [[ -f ruff.toml || -f .ruff.toml ]] || grep -qs '^\[tool\.ruff' pyproject.toml; then
             ruff format --check .

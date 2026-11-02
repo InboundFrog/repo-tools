@@ -253,6 +253,40 @@ PY
 fi
 
 echo
+echo "Python lint"
+# The Lint step wraps ruff so a project's own ruff wins over the pinned one. The
+# fallback has to be decided before it is defined: a ruff() function would
+# satisfy `command -v ruff` itself, and `command ruff` then finds nothing.
+if ((have_yaml)); then
+  python3 - "$ROOT/.github/workflows/python.yml" >"$(rt_tmpdir)/python-lint.sh" <<'PY'
+import sys, yaml
+for job in yaml.safe_load(open(sys.argv[1]))["jobs"].values():
+    for s in job.get("steps", []):
+        if s.get("name") == "Lint": print(s["run"], end="")
+PY
+  fakebin="$(rt_tmpdir)/fakebin"
+  mkdir -p "$fakebin" "$(rt_tmpdir)/empty-project"
+  cat >"$fakebin/uvx" <<'SH'
+#!/usr/bin/env bash
+echo "uvx $*" >>"$RT_CALLS"
+SH
+  chmod +x "$fakebin/uvx"
+  # Runs the step in an empty project with only the fakes (plus bash and grep) on PATH; prints what got called.
+  run_lint() {
+    (cd "$(rt_tmpdir)/empty-project" && RT_CALLS="$1" CMD='' RT_RUFF_VERSION=9.9.9 PATH="$fakebin:/usr/bin:/bin" \
+      bash -eo pipefail "$(rt_tmpdir)/python-lint.sh" 2>&1 && cat "$1")
+  }
+  assert_eq "no ruff on PATH: the pinned ruff runs via uvx" "uvx ruff@9.9.9 check --output-format=github ." \
+    "$(run_lint "$(rt_tmpdir)/lint-calls-1")"
+  cat >"$fakebin/ruff" <<'SH'
+#!/usr/bin/env bash
+echo "ruff $*" >>"$RT_CALLS"
+SH
+  chmod +x "$fakebin/ruff"
+  assert_eq "ruff on PATH: it runs directly" "ruff check --output-format=github ." "$(run_lint "$(rt_tmpdir)/lint-calls-2")"
+fi
+
+echo
 echo "Reading workflows for repo-protect"
 wf="$(rt_tmpdir)/wf.yml"
 lacks() { # YAML -> yes if a job is left on the default token permissions
