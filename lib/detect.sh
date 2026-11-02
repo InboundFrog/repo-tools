@@ -40,6 +40,9 @@ _rt_rootmost() {
   ((${#kept[@]} == 0)) || printf '%s\n' "${kept[@]}"
 }
 
+# _rt_emit NAME DIRS: prints "name<TAB>dir,dir" unless DIRS (one per line) is empty.
+_rt_emit() { [[ -z $2 ]] || printf '%s\t%s\n' "$1" "$(paste -sd, - <<<"$2")"; }
+
 # _rt_match FILES REGEX -> matching paths
 _rt_match() { grep -E "$2" <<<"$1" || true; }
 
@@ -66,8 +69,6 @@ rt_detect_langs() {
   local dir=$1 files dirs
   files=$(_rt_files "$dir")
 
-  _emit() { [[ -z $2 ]] || printf '%s\t%s\n' "$1" "$(paste -sd, - <<<"$2")"; }
-
   # Python: needs project metadata, or requirements files plus actual .py code.
   # Standalone scripts (.py files and no project anywhere) get one job at the
   # root, which lints them; pytest and the build find nothing and pass.
@@ -76,25 +77,24 @@ rt_detect_langs() {
     dirs=$(printf '%s\n%s\n' "$dirs" "$(_rt_match "$files" '(^|/)requirements[^/]*\.txt$' | _rt_dirs)")
     [[ -n ${dirs//[[:space:]]/} ]] || dirs=.
   fi
-  _emit python "$(_rt_rootmost <<<"$dirs")"
+  _rt_emit python "$(_rt_rootmost <<<"$dirs")"
 
-  _emit node "$(_rt_match "$files" '(^|/)package\.json$' | _rt_dirs | _rt_rootmost)"
-  _emit rust "$(_rt_match "$files" '(^|/)Cargo\.toml$' | _rt_dirs | _rt_rootmost)"
-  _emit gradle "$(_rt_match "$files" '(^|/)(settings|build)\.gradle(\.kts)?$' | _rt_dirs | _rt_rootmost)"
-  _emit maven "$(_rt_match "$files" '(^|/)pom\.xml$' | _rt_dirs | _rt_rootmost)"
+  _rt_emit node "$(_rt_match "$files" '(^|/)package\.json$' | _rt_dirs | _rt_rootmost)"
+  _rt_emit rust "$(_rt_match "$files" '(^|/)Cargo\.toml$' | _rt_dirs | _rt_rootmost)"
+  _rt_emit gradle "$(_rt_match "$files" '(^|/)(settings|build)\.gradle(\.kts)?$' | _rt_dirs | _rt_rootmost)"
+  _rt_emit maven "$(_rt_match "$files" '(^|/)pom\.xml$' | _rt_dirs | _rt_rootmost)"
 
   # Terraform and shell jobs scan the whole repo themselves, so run from root.
-  grep -qE '\.tf$' <<<"$files" && _emit terraform .
+  grep -qE '\.tf$' <<<"$files" && _rt_emit terraform .
 
   # Ansible: ansible.cfg / galaxy.yml dirs, or the parent of a roles/ tree.
   dirs=$(
     _rt_match "$files" '(^|/)(ansible\.cfg|galaxy\.ya?ml)$' | _rt_dirs
     _rt_match "$files" '(^|/)roles/[^/]+/tasks/main\.ya?ml$' | sed -E 's#(^|/)roles/[^/]+/tasks/main\.ya?ml$##; s#^$#.#'
   )
-  _emit ansible "$(_rt_rootmost <<<"$dirs")"
+  _rt_emit ansible "$(_rt_rootmost <<<"$dirs")"
 
-  [[ -n $(rt_shell_files "$dir" | head -n1) ]] && _emit shell .
-  unset -f _emit
+  [[ -n $(rt_shell_files "$dir" | head -n1) ]] && _rt_emit shell .
   return 0
 }
 
@@ -106,10 +106,9 @@ rt_detect_ecosystems() {
   local dir=$1 files uv_dirs pip_dirs d u under
 
   files=$(_rt_files "$dir")
-  _emit() { [[ -z $2 ]] || printf '%s\t%s\n' "$1" "$(paste -sd, - <<<"$2")"; }
 
-  _emit github-actions .
-  _emit npm "$(_rt_match "$files" '(^|/)package\.json$' | _rt_dirs | _rt_rootmost)"
+  _rt_emit github-actions .
+  _rt_emit npm "$(_rt_match "$files" '(^|/)package\.json$' | _rt_dirs | _rt_rootmost)"
 
   uv_dirs=$(_rt_match "$files" '(^|/)uv\.lock$' | _rt_dirs)
   pip_dirs=$(_rt_match "$files" '(^|/)(pyproject\.toml|setup\.py|setup\.cfg|Pipfile|requirements[^/]*\.txt)$' | _rt_dirs |
@@ -120,14 +119,13 @@ rt_detect_ecosystems() {
       done <<<"$uv_dirs"
       ((under)) || printf '%s\n' "$d"
     done)
-  _emit uv "$uv_dirs"
-  _emit pip "$pip_dirs"
+  _rt_emit uv "$uv_dirs"
+  _rt_emit pip "$pip_dirs"
 
-  _emit cargo "$(_rt_match "$files" '(^|/)Cargo\.toml$' | _rt_dirs | _rt_rootmost)"
-  _emit gradle "$(_rt_match "$files" '(^|/)(settings|build)\.gradle(\.kts)?$' | _rt_dirs | _rt_rootmost)"
-  _emit maven "$(_rt_match "$files" '(^|/)pom\.xml$' | _rt_dirs | _rt_rootmost)"
-  _emit terraform "$(_rt_match "$files" '\.tf$' | _rt_dirs)"
-  _emit docker "$(_rt_match "$files" '(^|/)(Dockerfile|Containerfile)([.-][^/]*)?$|\.[Dd]ockerfile$' | _rt_dirs)"
-  unset -f _emit
+  _rt_emit cargo "$(_rt_match "$files" '(^|/)Cargo\.toml$' | _rt_dirs | _rt_rootmost)"
+  _rt_emit gradle "$(_rt_match "$files" '(^|/)(settings|build)\.gradle(\.kts)?$' | _rt_dirs | _rt_rootmost)"
+  _rt_emit maven "$(_rt_match "$files" '(^|/)pom\.xml$' | _rt_dirs | _rt_rootmost)"
+  _rt_emit terraform "$(_rt_match "$files" '\.tf$' | _rt_dirs)"
+  _rt_emit docker "$(_rt_match "$files" '(^|/)(Dockerfile|Containerfile)([.-][^/]*)?$|\.[Dd]ockerfile$' | _rt_dirs)"
   return 0
 }

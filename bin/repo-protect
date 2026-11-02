@@ -9,6 +9,7 @@ source "$RT_ROOT/lib/common.sh"
 source "$RT_ROOT/lib/compare.sh"
 
 RT_RULESET_NAME="repo-tools: default branch"
+RT_TAG_RULESET_NAME="repo-tools: release tags"
 RT_APPROVALS="${RT_APPROVALS:-0}"
 RT_BYPASS="${RT_BYPASS:-pull_request}"
 RT_INCLUDE_PRIVATE="${RT_INCLUDE_PRIVATE:-0}"
@@ -32,6 +33,8 @@ Public repos (or private with --include-private, which needs a paid plan):
   - ruleset "$RT_RULESET_NAME" on the default branch: no deletion or force
     push, changes via PR only, and "$RT_CI_CHECK_NAME" must pass once
     $RT_CI_FILE is on the default branch (re-run after merging the CI PR)
+  - on $RT_SOURCE_REPO itself, ruleset "$RT_TAG_RULESET_NAME": only admins can
+    create, move or delete vX.Y.Z tags, the releases callers are pinned to
 
 REPO is "owner/name", or "name" for repos you own.
 
@@ -80,6 +83,34 @@ ruleset_json() { # REQUIRE_CHECK(true|false)
             required_status_checks: [{ context: $check, integration_id: $app_id }] } }
       ] else [] end))
     }'
+}
+
+# Release tags on the repo hosting the reusable workflows. rt_resolve_ref pins
+# callers to the newest vX.Y.Z tag, so whoever can push one ships code to every
+# repo: only admins may create, move or delete them.
+tag_ruleset_json() {
+  jq -n --arg name "$RT_TAG_RULESET_NAME" --argjson admin_role "$REPO_ADMIN_ROLE_ID" '{
+    name: $name,
+    target: "tag",
+    enforcement: "active",
+    conditions: { ref_name: { include: ["refs/tags/v*"], exclude: [] } },
+    bypass_actors: [{ actor_id: $admin_role, actor_type: "RepositoryRole", bypass_mode: "always" }],
+    rules: [{ type: "creation" }, { type: "update" }, { type: "deletion" }]
+  }'
+}
+
+# upsert_ruleset NAME JSON [NOTE]: creates or updates the ruleset called NAME.
+upsert_ruleset() {
+  local id
+  id=$(gh api "repos/$RT_REPO/rulesets?includes_parents=false" |
+    jq -r --arg name "$1" '[.[] | select(.name == $name) | .id] | first // empty')
+  if [[ -n $id ]]; then
+    rt_api PUT "repos/$RT_REPO/rulesets/$id" "$2"
+    rt_done "ruleset \"$1\" updated${3:+ ($3)}"
+  else
+    rt_api POST "repos/$RT_REPO/rulesets" "$2"
+    rt_done "ruleset \"$1\" created${3:+ ($3)}"
+  fi
 }
 
 # CodeQL "default setup": GitHub picks the languages and keeps the queries
@@ -179,14 +210,9 @@ process() {
     warn "Merge the repo-ci PR, then re-run repo-protect."
   fi
 
-  id=$(gh api "repos/$RT_REPO/rulesets?includes_parents=false" \
-    --jq ".[] | select(.name == \"$RT_RULESET_NAME\") | .id")
-  if [[ -n $id ]]; then
-    rt_api PUT "repos/$RT_REPO/rulesets/$id" "$(ruleset_json "$require_check")"
-    rt_done "ruleset updated (required check: $require_check)"
-  else
-    rt_api POST "repos/$RT_REPO/rulesets" "$(ruleset_json "$require_check")"
-    rt_done "ruleset created (required check: $require_check)"
+  upsert_ruleset "$RT_RULESET_NAME" "$(ruleset_json "$require_check")" "required check: $require_check"
+  if [[ ${RT_REPO,,} == "${RT_SOURCE_REPO,,}" ]]; then
+    upsert_ruleset "$RT_TAG_RULESET_NAME" "$(tag_ruleset_json)"
   fi
 }
 
