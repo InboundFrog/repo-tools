@@ -103,7 +103,7 @@ PY
 fi
 if command -v actionlint >/dev/null; then
   d=$(mktemp -d "$(rt_tmpdir)/examples.XXXXXX")
-  mkdir -p "$d/.github/workflows" && cp "${EXAMPLES[@]}" "$d/.github/workflows/"
+  git init -q "$d" && mkdir -p "$d/.github/workflows" && cp "${EXAMPLES[@]}" "$d/.github/workflows/" # actionlint wants a project root
   if out=$(cd "$d" && actionlint 2>&1); then pass "examples pass actionlint"; else fail "examples pass actionlint" "$out"; fi
 fi
 

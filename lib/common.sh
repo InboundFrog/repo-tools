@@ -175,7 +175,8 @@ rt_workflow_lacks_permissions() {
       <<<"$json" >/dev/null
   else
     # No YAML parser: only a top-level block is recognised.
-    ! grep -qE '^permissions:' "$1"
+    if grep -qE '^permissions:' "$1"; then return 1; fi
+    return 0
   fi
 }
 
