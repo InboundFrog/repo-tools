@@ -330,6 +330,77 @@ else
 fi
 
 echo
+echo "repo-protect --dry-run against a fake gh"
+# The fake answers each read with a file in $FAKE_GH_API named after the API
+# path, every non-alphanumeric character turned into "_"; a missing file is a 404.
+fakegh="$(rt_tmpdir)/fakegh" api="$(rt_tmpdir)/fakegh-api"
+mkdir -p "$fakegh" "$api"
+cat >"$fakegh/gh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+path='' jq_expr=''
+[[ $1 == repo ]] && path=repo_view
+shift
+while (($#)); do
+  case $1 in
+    --jq) jq_expr=$2 && shift ;;
+    -H | --method | --json) shift ;;
+    -*) ;;
+    *) [[ -n $path ]] || path=$1 ;;
+  esac
+  shift
+done
+file="$FAKE_GH_API/${path//[^A-Za-z0-9]/_}"
+[[ -f $file ]] || { echo "gh: Not Found (HTTP 404)" >&2 && exit 1; }
+if [[ -n $jq_expr ]]; then jq -r "$jq_expr" "$file"; else cat "$file"; fi
+SH
+chmod +x "$fakegh/gh"
+fake() { printf '%s\n' "$2" >"$api/${1//[^A-Za-z0-9]/_}"; } # API_PATH CONTENT
+fake repo_view '{"nameWithOwner": "octo/app", "visibility": "PUBLIC", "defaultBranchRef": {"name": "main"},
+  "isArchived": false, "viewerPermission": "ADMIN"}'
+fake 'repos/octo/app/contents/.github/workflows?ref=main' '[{"type": "file", "name": "ci.yml"}]'
+fake 'repos/octo/app/contents/.github/workflows/ci.yml?ref=main' \
+  $'permissions: {}\njobs:\n  ci-ok:\n    name: CI OK\n    runs-on: x'
+fake repos/octo/app/actions/permissions/workflow \
+  '{"default_workflow_permissions": "read", "can_approve_pull_request_reviews": false}'
+fake repos/octo/app/code-scanning/default-setup '{"state": "configured"}'
+fake 'repos/octo/app/rulesets?includes_parents=false&per_page=100' \
+  '[{"id": 1, "name": "repo-tools: default branch"}, {"id": 2, "name": "Main Branch"}, {"id": 3, "name": "Tags"}]'
+fake repos/octo/app/rulesets/2 '{"name": "Main\u001b]0;x\u0007 Branch", "target": "branch", "enforcement": "active",
+  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}}}'
+fake repos/octo/app/rulesets/3 '{"name": "Tags", "target": "tag", "enforcement": "active",
+  "conditions": {"ref_name": {"include": ["~ALL"], "exclude": []}}}'
+protect() { # ARGS... -> repo-protect's output; the exit status is appended
+  local rc=0 out
+  out=$(PATH="$fakegh:$PATH" FAKE_GH_API="$api" "$ROOT/bin/repo-protect" "$@" 2>&1) || rc=$?
+  printf '%s\nexit %s\n' "$out" "$rc"
+}
+squeeze() { tr -d ' \n' <<<"$1"; } # pretty-printed JSON -> compact, for matching
+
+out=$(protect --dry-run --prune octo/app)
+assert_contains "dry run succeeds" "exit 0" "$out"
+assert_contains "repo settings: merge commits only" \
+  '"allow_merge_commit":true,"allow_squash_merge":false,"allow_rebase_merge":false' "$(squeeze "$out")"
+assert_contains "ruleset updated in place" "[dry-run] PUT repos/octo/app/rulesets/1" "$out"
+assert_contains "ruleset: merge commits only" '"allowed_merge_methods":["merge"]' "$(squeeze "$out")"
+assert_contains "ruleset: conversations must be resolved" '"required_review_thread_resolution": true' "$out"
+assert_contains "ruleset: branch must be up to date" '"strict_required_status_checks_policy": true' "$out"
+assert_contains "ruleset: CodeQL gate where default setup is on" '"type": "code_scanning"' "$out"
+assert_contains "--prune deletes another ruleset on the default branch" "[dry-run] DELETE repos/octo/app/rulesets/2" "$out"
+assert_not_contains "--prune keeps a tag ruleset" "rulesets/3" "$out"
+assert_not_contains "control characters stripped from ruleset names" $'\e' "$out"
+
+out=$(RT_CODEQL=0 RT_MERGE_METHODS="merge, rebase" protect --dry-run octo/app)
+assert_contains "RT_MERGE_METHODS can allow rebase" '"allowed_merge_methods":["merge","rebase"]' "$(squeeze "$out")"
+assert_contains "... in the repo settings too" '"allow_squash_merge":false,"allow_rebase_merge":true' "$(squeeze "$out")"
+assert_not_contains "RT_CODEQL=0: no CodeQL gate" '"code_scanning"' "$out"
+assert_contains "without --prune, a leftover ruleset is reported" "ruleset \"Main]0;x Branch\" (id 2, active) isn't from repo-tools and also covers main" "$out"
+assert_not_contains "without --prune, nothing is deleted" "DELETE" "$out"
+assert_contains "a ruleset for something else is mentioned, not deleted" '"Tags" (tag, active)' "$out"
+assert_contains "unknown merge method refused" "exit 1" "$(RT_MERGE_METHODS=squish protect --dry-run octo/app)"
+assert_contains "empty merge methods refused" "exit 1" "$(RT_MERGE_METHODS=, protect --dry-run octo/app)"
+
+echo
 echo "Repository names"
 for bad in --force -h 'a/b/c' '../x' 'https://github.com/a/b' ''; do
   if (rt_resolve_repo "$bad") 2>/dev/null; then rc=0; else rc=$?; fi
