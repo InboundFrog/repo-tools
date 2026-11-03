@@ -9,7 +9,7 @@ the same security baseline on every repo you own.
 | `.github/workflows/<lang>.yml` | Reusable workflows: Python, Node, Rust, JVM, Terraform, Ansible, shell |
 | `examples/workflows/` | Caller workflows to copy into a repo as `.github/workflows/ci.yml` |
 | `examples/dependabot.yml` | Dependabot config to copy, covering every ecosystem the workflows know |
-| `bin/repo-protect` | Repo settings, idempotently: Dependabot alerts and security updates, delete-branch-on-merge, a read-only Actions token; on public repos also secret scanning, private vulnerability reporting, CodeQL and a default-branch ruleset requiring `CI OK` |
+| `bin/repo-protect` | Repo settings, idempotently: Dependabot alerts and security updates, delete-branch-on-merge, merge commits only (no squash or rebase), a read-only Actions token; on public repos also secret scanning, private vulnerability reporting, CodeQL and a default-branch ruleset requiring `CI OK` |
 
 ## Quick start
 
@@ -31,6 +31,7 @@ bin/repo-protect --dry-run my-project    # show the API calls instead
 bin/repo-protect --all                   # every non-archived, non-fork repo you own
 bin/repo-protect --all --public          # public ones only
 bin/repo-protect --file repos.txt        # one per line, # comments allowed
+bin/repo-protect --prune my-project      # also delete older rulesets on the default branch
 ```
 
 Re-run it whenever you like: it only changes what is out of date. Run it again
@@ -137,8 +138,13 @@ commit, and say so when a newer release exists.
 `repo-protect` creates or updates a ruleset named `repo-tools: default branch`:
 
 - no deleting or force-pushing the default branch
-- changes go through a pull request (0 approvals by default, since you can't approve your own)
-- `CI OK` must pass, once a workflow on the default branch has a job of that name
+- changes go through a pull request (0 approvals by default, since you can't approve your own),
+  merged with a merge commit; squash and rebase are refused
+- review conversations must be resolved before merging
+- CodeQL alerts block merging (security alerts of medium severity or higher,
+  and errors and warnings), on repos where CodeQL default setup is on
+- `CI OK` must pass on a branch that is up to date with the default branch, once
+  a workflow on the default branch has a job of that name
 
 Repo admins can bypass these rules on a PR (e.g. to merge with failing checks)
 but can't push directly to the default branch. Tune this with environment variables:
@@ -147,7 +153,20 @@ but can't push directly to the default branch. Tune this with environment variab
 |---|---|---|
 | `RT_APPROVALS` | `0` | Required approving reviews |
 | `RT_BYPASS` | `pull_request` | Admin bypass: `pull_request`, `always` or `none` |
-| `RT_CODEQL` | `1` | Enable CodeQL default setup on public repos (`0` to skip) |
+| `RT_CODEQL` | `1` | Enable CodeQL default setup on public repos, and gate merges on it (`0` skips both) |
+| `RT_MERGE_METHODS` | `merge` | Merge methods allowed, comma separated: `merge`, `squash`, `rebase` |
+
+The merge methods are also set in the repo's own settings (Settings > General),
+on every repo, private ones included: the other buttons disappear from PRs, and
+on the Free plan that is the only thing stopping a squash merge on a private repo.
+
+**Other rulesets.** When several rulesets cover a branch, all of them apply:
+the strictest setting wins, and a bypass only lifts the ruleset that grants it.
+So a ruleset made by hand before `repo-protect` can still decide what happens
+on the default branch, for instance by allowing no bypass at all. `repo-protect`
+lists every other ruleset that covers the default branch, disabled ones
+included; once `repo-tools: default branch` does what you need, `--prune`
+deletes them. Rulesets for other branches or for tags are left alone.
 
 On the repo hosting the reusable workflows (`RT_SOURCE_REPO`, this one by
 default) it adds a second ruleset, `repo-tools: release tags`: only repo admins
@@ -172,8 +191,8 @@ On every repo, `repo-protect` also restricts GitHub Actions:
   can't satisfy a required review.
 
 **Free plan limits:** rulesets, secret scanning and CodeQL only work on public repos.
-Private repos still get Dependabot, the token restriction and delete-branch-on-merge,
-but CI isn't *enforced*. With GitHub Pro, pass `--include-private` to apply rulesets there too.
+Private repos still get Dependabot, the token restriction, delete-branch-on-merge and
+the merge-method setting, but CI isn't *enforced*, and force-pushes aren't blocked. With GitHub Pro, pass `--include-private` to apply rulesets there too.
 
 ## Security model
 

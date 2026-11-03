@@ -12,6 +12,8 @@ RT_APPROVALS="${RT_APPROVALS:-0}"
 RT_BYPASS="${RT_BYPASS:-pull_request}"
 RT_INCLUDE_PRIVATE="${RT_INCLUDE_PRIVATE:-0}"
 RT_CODEQL="${RT_CODEQL:-1}"
+RT_MERGE_METHODS="${RT_MERGE_METHODS:-merge}"
+RT_PRUNE=0
 GITHUB_ACTIONS_APP_ID=15368 # pins the required check to GitHub Actions
 REPO_ADMIN_ROLE_ID=5
 
@@ -24,6 +26,8 @@ Idempotent: re-running only changes what is out of date.
 All repos:
   - Dependabot alerts and security updates
   - delete head branches after merge
+  - merge methods: only those in RT_MERGE_METHODS (default: merge commits;
+    squash and rebase are switched off)
   - GitHub Actions: workflows get a read-only GITHUB_TOKEN unless they declare
     more in \`permissions:\`, and can't create or approve pull requests
     (workflows that don't declare \`permissions:\` are listed first)
@@ -32,8 +36,13 @@ Public repos (or private with --include-private, which needs a paid plan):
     CodeQL code scanning "default setup" (public only; a repo already running
     its own CodeQL workflow is left alone)
   - ruleset "$RT_RULESET_NAME" on the default branch: no deletion or force
-    push, changes via PR only, and "$RT_CI_CHECK_NAME" must pass once a
-    workflow on the default branch has a job of that name (examples/workflows)
+    push; changes via PR only, merged with RT_MERGE_METHODS, once review
+    conversations are resolved and the branch is up to date; CodeQL alerts
+    (medium+ security, errors and warnings) block merging where CodeQL default
+    setup is on; "$RT_CI_CHECK_NAME" must pass once a workflow on the default
+    branch has a job of that name (examples/workflows)
+  - other rulesets on the default branch are listed (their rules add up with
+    these); --prune deletes them
   - on $RT_SOURCE_REPO itself, ruleset "$RT_TAG_RULESET_NAME": only admins can
     create, move or delete vX.Y.Z tags, the releases callers are pinned to
 
@@ -46,23 +55,48 @@ Repo selection (combine freely):
 Options:
   -n, --dry-run           Show what would change without changing anything
       --include-private   Also apply rulesets to private repos (GitHub Pro)
+      --prune             Delete rulesets on the default branch that repo-tools
+                          didn't create, once its own ruleset is in place
   -h, --help              Show this help
 
 Environment:
   RT_APPROVALS  Required approving reviews (default: 0, as you can't approve your own PRs)
   RT_BYPASS     Admin bypass: pull_request (default; can override failing checks on
                 a PR, but can't push directly), always, or none
-  RT_CODEQL     1 (default) enables CodeQL default setup on public repos; 0 skips it
+  RT_CODEQL     1 (default) enables CodeQL default setup on public repos, and makes
+                its alerts block merging; 0 skips both
+  RT_MERGE_METHODS  Allowed merge methods, any of merge, squash and rebase,
+                comma separated (default: merge)
 USAGE
 }
 
-ruleset_json() { # REQUIRE_CHECK(true|false)
+# RT_MERGE_METHODS as a JSON array, in GitHub's order; fails on anything else.
+merge_methods_json() {
+  jq -cen --arg m "$RT_MERGE_METHODS" '
+    [$m | splits("[ ,]+") | select(. != "")] as $want
+    | select(($want | length) > 0 and all($want[]; IN("merge", "squash", "rebase")))
+    | ["merge", "squash", "rebase"] | map(select(IN($want[])))'
+}
+
+# Repo settings, so the other merge buttons are gone; on every repo, as unlike
+# the ruleset they need no paid plan on private ones.
+set_merge_methods() {
+  rt_api PATCH "repos/$RT_REPO" "$(jq -cn --argjson m "$MERGE_METHODS" '{
+    allow_merge_commit: IN($m[]; "merge"),
+    allow_squash_merge: IN($m[]; "squash"),
+    allow_rebase_merge: IN($m[]; "rebase") }')"
+  rt_done "merge methods: $(jq -r 'join(", ")' <<<"$MERGE_METHODS") only"
+}
+
+ruleset_json() { # REQUIRE_CHECK(true|false) CODEQL_GATE(true|false)
   jq -n \
     --arg name "$RT_RULESET_NAME" \
     --arg bypass "$RT_BYPASS" \
     --arg check "$RT_CI_CHECK_NAME" \
     --argjson approvals "$RT_APPROVALS" \
+    --argjson merge_methods "$MERGE_METHODS" \
     --argjson require_check "$1" \
+    --argjson codeql_gate "$2" \
     --argjson app_id "$GITHUB_ACTIONS_APP_ID" \
     --argjson admin_role "$REPO_ADMIN_ROLE_ID" \
     '{
@@ -80,10 +114,16 @@ ruleset_json() { # REQUIRE_CHECK(true|false)
             dismiss_stale_reviews_on_push: true,
             require_code_owner_review: false,
             require_last_push_approval: false,
-            required_review_thread_resolution: false } }
-      ] + (if $require_check then [
+            required_review_thread_resolution: true,
+            allowed_merge_methods: $merge_methods } }
+      ] + (if $codeql_gate then [
+        { type: "code_scanning", parameters: { code_scanning_tools: [{
+            tool: "CodeQL",
+            security_alerts_threshold: "medium_or_higher",
+            alerts_threshold: "errors_and_warnings" }] } }
+      ] else [] end) + (if $require_check then [
         { type: "required_status_checks", parameters: {
-            strict_required_status_checks_policy: false,
+            strict_required_status_checks_policy: true,
             do_not_enforce_on_create: true,
             required_status_checks: [{ context: $check, integration_id: $app_id }] } }
       ] else [] end))
@@ -104,11 +144,13 @@ tag_ruleset_json() {
   }'
 }
 
+# The repo's own rulesets (not ones inherited from an organization).
+list_rulesets() { gh api "repos/$RT_REPO/rulesets?includes_parents=false&per_page=100"; }
+
 # upsert_ruleset NAME JSON [NOTE]: creates or updates the ruleset called NAME.
 upsert_ruleset() {
   local id
-  id=$(gh api "repos/$RT_REPO/rulesets?includes_parents=false" |
-    jq -r --arg name "$1" '[.[] | select(.name == $name) | .id] | first // empty')
+  id=$(list_rulesets | jq -r --arg name "$1" '[.[] | select(.name == $name) | .id] | first // empty')
   if [[ -n $id ]]; then
     rt_api PUT "repos/$RT_REPO/rulesets/$id" "$2"
     rt_done "ruleset \"$1\" updated${3:+ ($3)}"
@@ -118,18 +160,55 @@ upsert_ruleset() {
   fi
 }
 
+# Rulesets repo-protect didn't create. Every ruleset on a branch applies at
+# once: the strictest setting wins, and a bypass only lifts the ruleset that
+# grants it. So a leftover on the default branch can quietly override this one
+# (a stricter merge method, no admin bypass). Those are listed, or deleted with
+# --prune; rulesets for other branches or tags are left alone.
+check_other_rulesets() {
+  local id json covers enforcement target name found=0
+  while IFS= read -r id; do
+    json=$(gh api "repos/$RT_REPO/rulesets/$id") || continue
+    IFS=$'\t' read -r covers enforcement target name < <(jq -r --arg ref "refs/heads/$RT_DEFAULT_BRANCH" '
+      def hits: any(.[]?; . == "~ALL" or . == "~DEFAULT_BRANCH" or . == $ref);
+      [ (.target == "branch" and (.conditions.ref_name.include | hits)
+          and (.conditions.ref_name.exclude | hits | not)),
+        .enforcement, .target, .name ]
+      | map(tostring | gsub("[\u0000-\u001f\u007f]"; "")) | join("\t")' <<<"$json")
+    if [[ $covers != true ]]; then
+      info "ruleset \"$name\" ($target, $enforcement) isn't from repo-tools and doesn't cover $RT_DEFAULT_BRANCH; left alone"
+    elif ((RT_PRUNE)); then
+      rt_api DELETE "repos/$RT_REPO/rulesets/$id"
+      rt_done "ruleset \"$name\" ($enforcement) deleted"
+    else
+      warn "ruleset \"$name\" (id $id, $enforcement) isn't from repo-tools and also covers $RT_DEFAULT_BRANCH"
+      found=1
+    fi
+  done < <(list_rulesets | jq -r --arg a "$RT_RULESET_NAME" --arg b "$RT_TAG_RULESET_NAME" \
+    '.[] | select(.name != $a and .name != $b and (.id | type == "number")) | .id')
+  if ((found)); then
+    warn "  While active, its rules apply on top of \"$RT_RULESET_NAME\" (the strictest wins)."
+    warn "  Re-run with --prune to delete it, once \"$RT_RULESET_NAME\" does what you need."
+  fi
+}
+
 # CodeQL "default setup": GitHub picks the languages and keeps the queries
 # current, with no workflow file in the repo. Repos running their own CodeQL
 # workflow ("advanced setup") can't use it; the API refuses and we move on.
+# Sets CODEQL_ON once it is on (or would be, in a dry run): the ruleset only
+# gates merges on CodeQL where results are sure to arrive for every PR.
 enable_codeql() {
   local state
   state=$(gh api "repos/$RT_REPO/code-scanning/default-setup" --jq .state 2>/dev/null) || state=unknown
   if [[ $state == configured ]]; then
     ok "CodeQL default setup already on"
+    CODEQL_ON=true
   elif rt_api PATCH "repos/$RT_REPO/code-scanning/default-setup" '{"state": "configured"}' 2>/dev/null; then
     rt_done "CodeQL default setup enabled"
+    CODEQL_ON=true
   else
     warn "could not enable CodeQL default setup (most likely the repo has its own CodeQL workflow); leaving it as is"
+    warn "  CodeQL alerts won't block merging, as nothing ensures every PR gets results."
   fi
 }
 
@@ -174,7 +253,7 @@ restrict_actions_token() {
 }
 
 process() {
-  local repo require_check=false
+  local repo require_check=false CODEQL_ON=false
   log "Protect: $1"
   repo=$(rt_resolve_repo "$1") # an assignment, so a refused name stops here under set -e
   rt_load_repo "$repo"
@@ -194,6 +273,8 @@ process() {
   else
     rt_done "delete branch on merge enabled"
   fi
+
+  set_merge_methods
 
   restrict_actions_token
 
@@ -224,10 +305,12 @@ process() {
     warn "no workflow on $RT_DEFAULT_BRANCH has a '$RT_CI_CHECK_NAME' job, so it won't be required."
     warn "Add a caller from examples/workflows (see the README), merge it, then re-run repo-protect."
   fi
-  upsert_ruleset "$RT_RULESET_NAME" "$(ruleset_json "$require_check")" "required check: $require_check"
+  upsert_ruleset "$RT_RULESET_NAME" "$(ruleset_json "$require_check" "$CODEQL_ON")" \
+    "required check: $require_check, CodeQL gate: $CODEQL_ON"
   if [[ ${RT_REPO,,} == "${RT_SOURCE_REPO,,}" ]]; then
     upsert_ruleset "$RT_TAG_RULESET_NAME" "$(tag_ruleset_json)"
   fi
+  check_other_rulesets
 }
 
 repos=() all=0 public=0
@@ -241,6 +324,7 @@ while (($#)); do
       shift
       ;;
     --include-private) RT_INCLUDE_PRIVATE=1 ;;
+    --prune) RT_PRUNE=1 ;;
     -n | --dry-run) RT_DRY_RUN=1 ;;
     -h | --help)
       usage
@@ -261,6 +345,8 @@ rt_require gh jq
 [[ $RT_APPROVALS =~ ^[0-9]+$ ]] || die "RT_APPROVALS must be a number"
 [[ $RT_CODEQL == [01] ]] || die "RT_CODEQL must be 0 or 1"
 case $RT_BYPASS in pull_request | always | none) ;; *) die "RT_BYPASS must be pull_request, always or none" ;; esac
+MERGE_METHODS=$(merge_methods_json) ||
+  die "RT_MERGE_METHODS must list one or more of merge, squash, rebase (got: $RT_MERGE_METHODS)"
 if ((RT_APPROVALS > 0)) && [[ $RT_BYPASS == none ]]; then
   warn "RT_APPROVALS=$RT_APPROVALS with no bypass: you won't be able to merge your own PRs alone"
 fi
