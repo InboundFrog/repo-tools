@@ -32,10 +32,17 @@ bin/repo-protect --all                   # every non-archived, non-fork repo you
 bin/repo-protect --all --public          # public ones only
 bin/repo-protect --file repos.txt        # one per line, # comments allowed
 bin/repo-protect --prune my-project      # also delete older rulesets on the default branch
+bin/repo-protect --re-enable-workflows --re-enable-dependabot my-project  # see below
 ```
 
 Re-run it whenever you like: it only changes what is out of date. Run it again
 after the CI PR merges, so the ruleset starts requiring `CI OK`.
+
+GitHub Actions and Dependabot security updates that are switched off on a
+repo (say, to save Actions minutes on private repos) stay off: `repo-protect`
+says so and moves on. Pass `--re-enable-workflows` or `--re-enable-dependabot`
+to turn them back on. Dependabot alerts are always enabled; they open no PRs.
+Security updates start off on a new repo, so its first run needs `--re-enable-dependabot`.
 
 Repos set up by the old generator (`repo-tools-ci.yml` and `dependabot.yml`
 with a `Managed by repo-tools` header) keep working: they are ordinary callers.
