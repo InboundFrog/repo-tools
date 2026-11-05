@@ -397,6 +397,21 @@ assert_not_contains "RT_CODEQL=0: no CodeQL gate" '"code_scanning"' "$out"
 assert_contains "without --prune, a leftover ruleset is reported" "ruleset \"Main]0;x Branch\" (id 2, active) isn't from repo-tools and also covers main" "$out"
 assert_not_contains "without --prune, nothing is deleted" "DELETE" "$out"
 assert_contains "a ruleset for something else is mentioned, not deleted" '"Tags" (tag, active)' "$out"
+# No fake for actions/permissions or automated-security-fixes yet: both read as off.
+out=$(protect --dry-run octo/app)
+assert_not_contains "Dependabot security updates that are off stay off" "PUT repos/octo/app/automated-security-fixes" "$out"
+assert_contains "... and say how to turn them on" "--re-enable-dependabot" "$out"
+assert_not_contains "Actions that is off stays off" "PUT repos/octo/app/actions/permissions"$'\n' "$out"
+assert_contains "... and says how to turn it on" "--re-enable-workflows" "$out"
+out=$(protect --dry-run --re-enable-dependabot --re-enable-workflows octo/app)
+assert_contains "--re-enable-dependabot turns security updates on" "[dry-run] PUT repos/octo/app/automated-security-fixes" "$out"
+assert_contains "--re-enable-workflows turns Actions on" "[dry-run] PUT repos/octo/app/actions/permissions"$'\n' "$out"
+fake repos/octo/app/automated-security-fixes '{"enabled": true, "paused": false}'
+fake repos/octo/app/actions/permissions '{"enabled": true, "allowed_actions": "all"}'
+out=$(protect --dry-run octo/app)
+assert_contains "security updates already on: left alone" "Dependabot security updates already enabled" "$out"
+assert_not_contains "Actions already on: left alone" "PUT repos/octo/app/actions/permissions"$'\n' "$out"
+
 assert_contains "unknown merge method refused" "exit 1" "$(RT_MERGE_METHODS=squish protect --dry-run octo/app)"
 assert_contains "empty merge methods refused" "exit 1" "$(RT_MERGE_METHODS=, protect --dry-run octo/app)"
 

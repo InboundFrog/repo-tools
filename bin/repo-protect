@@ -14,6 +14,8 @@ RT_INCLUDE_PRIVATE="${RT_INCLUDE_PRIVATE:-0}"
 RT_CODEQL="${RT_CODEQL:-1}"
 RT_MERGE_METHODS="${RT_MERGE_METHODS:-merge}"
 RT_PRUNE=0
+RT_REENABLE_WORKFLOWS=0
+RT_REENABLE_DEPENDABOT=0
 GITHUB_ACTIONS_APP_ID=15368 # pins the required check to GitHub Actions
 REPO_ADMIN_ROLE_ID=5
 
@@ -24,13 +26,15 @@ Usage: $(basename "$0") [options] [REPO...]
 Idempotent: re-running only changes what is out of date.
 
 All repos:
-  - Dependabot alerts and security updates
+  - Dependabot alerts and security updates (security updates that were
+    switched off stay off; --re-enable-dependabot turns them back on)
   - delete head branches after merge
   - merge methods: only those in RT_MERGE_METHODS (default: merge commits;
     squash and rebase are switched off)
   - GitHub Actions: workflows get a read-only GITHUB_TOKEN unless they declare
     more in \`permissions:\`, and can't create or approve pull requests
-    (workflows that don't declare \`permissions:\` are listed first)
+    (workflows that don't declare \`permissions:\` are listed first); Actions
+    switched off on a repo stay off (--re-enable-workflows turns them back on)
 Public repos (or private with --include-private, which needs a paid plan):
   - secret scanning + push protection, private vulnerability reporting and
     CodeQL code scanning "default setup" (public only; a repo already running
@@ -57,6 +61,9 @@ Options:
       --include-private   Also apply rulesets to private repos (GitHub Pro)
       --prune             Delete rulesets on the default branch that repo-tools
                           didn't create, once its own ruleset is in place
+      --re-enable-workflows   Turn GitHub Actions back on where it is off
+      --re-enable-dependabot  Turn Dependabot security updates back on where
+                          they are off
   -h, --help              Show this help
 
 Environment:
@@ -252,6 +259,32 @@ restrict_actions_token() {
   fi
 }
 
+# Security updates open PRs, and on private repos their CI uses Actions
+# minutes, so someone may have switched them off on purpose: only turn them
+# back on when asked. A read that fails counts as off.
+dependabot_security_updates() {
+  if [[ $(gh api "repos/$RT_REPO/automated-security-fixes" --jq .enabled 2>/dev/null) == true ]]; then
+    ok "Dependabot security updates already enabled"
+  elif ((RT_REENABLE_DEPENDABOT)); then
+    rt_api PUT "repos/$RT_REPO/automated-security-fixes"
+    rt_done "Dependabot security updates enabled"
+  else
+    info "Dependabot security updates are off; leaving them off (--re-enable-dependabot turns them on)"
+  fi
+}
+
+# Same for GitHub Actions as a whole, which repo-protect otherwise never touches.
+actions_enabled() {
+  if [[ $(gh api "repos/$RT_REPO/actions/permissions" --jq .enabled 2>/dev/null) == true ]]; then
+    return 0
+  elif ((RT_REENABLE_WORKFLOWS)); then
+    rt_api PUT "repos/$RT_REPO/actions/permissions" '{"enabled": true}'
+    rt_done "GitHub Actions enabled"
+  else
+    info "GitHub Actions is off; leaving it off (--re-enable-workflows turns it on)"
+  fi
+}
+
 process() {
   local repo require_check=false CODEQL_ON=false
   log "Protect: $1"
@@ -262,8 +295,7 @@ process() {
 
   rt_api PUT "repos/$RT_REPO/vulnerability-alerts"
   rt_done "Dependabot alerts enabled"
-  rt_api PUT "repos/$RT_REPO/automated-security-fixes"
-  rt_done "Dependabot security updates enabled"
+  dependabot_security_updates
 
   rt_api PATCH "repos/$RT_REPO" '{"delete_branch_on_merge": true}'
   # Read it back: the setting is easy to miss in the UI, and only affects PRs
@@ -277,6 +309,7 @@ process() {
   set_merge_methods
 
   restrict_actions_token
+  actions_enabled
 
   if rt_is_public; then
     if rt_api PATCH "repos/$RT_REPO" '{"security_and_analysis": {
@@ -325,6 +358,8 @@ while (($#)); do
       ;;
     --include-private) RT_INCLUDE_PRIVATE=1 ;;
     --prune) RT_PRUNE=1 ;;
+    --re-enable-workflows) RT_REENABLE_WORKFLOWS=1 ;;
+    --re-enable-dependabot) RT_REENABLE_DEPENDABOT=1 ;;
     -n | --dry-run) RT_DRY_RUN=1 ;;
     -h | --help)
       usage
